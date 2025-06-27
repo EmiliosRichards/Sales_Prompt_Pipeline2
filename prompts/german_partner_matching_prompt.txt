@@ -1,0 +1,102 @@
+Your primary task is to analyze the provided [Target Company Attributes JSON] and the [List of Golden Partner Summaries]. Your goal is to identify the most relevant "Golden Partner" to use as a case study.
+
+Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Do not wrap the JSON in markdown formatting like ```json. Your response must begin with '{' and end with '}'.
+
+**CRITICAL MATCHING CRITERIA:**
+1.  **Primary Filter: Shared Industry/Audience.** Identify explicit similarities in industry terms, products/services offered, and target audience segments. Consider matches high-confidence when there's a direct semantic match or substantial overlap in key industry or target audience terms.
+2.  **Secondary Filter: Rank.** If multiple partners share equally relevant similarities, choose the partner with the better (lower numeric) rank.
+3.  **No Match Condition.** For the `matched_partner_name` return "No suitable match found" ONLY if there is no direct semantic or substantial overlap in the industry or target audience. `match_score` of "Low". Do not force a match. Do NOT return "No suitable match" when at least one significant keyword or audience segment is shared explicitly.
+
+4.  **Identify Key Rationale (in German).** Based on the shared attributes, provide a list of 2-4 key reasons for the match in the `match_rationale_features` field. These should be concise, clear, and in German. Examples: "Gemeinsame Zielgruppe: ...", "Ähnliche Produkte/Services: ...", "Überschneidende Marktsegmente: ..."
+
+**JSON Response Format:**
+{
+  "match_score": "High",
+  "matched_partner_name": "Partner Name",
+  "match_rationale_features": [
+    "Gemeinsame Zielgruppe im Gesundheitsbereich, speziell Einrichtungen mit hohem Bedarf an technologiebasierten Lösungen.",
+    "Ähnliche technologische Ausrichtung: Software und assistive Technologien zur Verbesserung der Patientenversorgung und Mobilität."
+  ]
+}
+
+Few-Shot Examples for Clarification:
+
+Example 1: High Match
+
+Target Company Attributes:
+  Industry: Healthcare Technology
+  Products: AI diagnostic software, patient monitoring
+  Audience: Hospitals, clinics
+
+Golden Partner Summary:
+  Industry: HealthTech
+  Products: Smart patient monitoring, AI-based diagnostics
+  Audience: Hospitals, care facilities
+  Rank: 5
+
+LLM Response:
+{
+"match_score": "High",
+"matched_partner_name": "Example HealthTech GmbH",
+"match_rationale_features": [
+"Gemeinsame Zielgruppe: Krankenhäuser und Kliniken",
+"Ähnliche technologische Lösungen: KI-basierte Diagnostik und Patientenüberwachung"
+]
+}
+
+Example 2: Medium Match (Different target groups, but similar product/service):
+
+Target Company Attributes:
+  Industry: Legal Technology
+  Products: Contract automation software
+  Audience: Law firms, legal departments
+
+Golden Partner Summary:
+  Industry: Software Solutions
+  Products: Document automation and workflow management
+  Audience: General SMEs
+  Rank: 3
+
+LLM Response:
+{
+"match_score": "Medium",
+"matched_partner_name": "GenericSoft GmbH",
+"match_rationale_features": [
+"Ähnliche technologische Lösungen: Automatisierung von Dokumentenprozessen",
+"Allgemeine Überschneidung bei digitalen Workflow-Lösungen"
+]
+}
+
+Example 3: No Match (No significant overlap):
+
+Target Company Attributes:
+  Industry: Food Manufacturing
+  Products: Organic snacks
+  Audience: Retail supermarkets, health stores
+
+Golden Partner Summary:
+  Industry: Construction Software
+  Products: Digital surveying apps
+  Audience: Construction companies
+  Rank: 2
+
+LLM Response:
+{
+"match_score": "Low",
+"matched_partner_name": "No suitable match found",
+"match_rationale_features": []
+}
+
+Additional Rules to Reduce Ambiguity:
+
+  * If industry terms differ but product/service terms explicitly align, consider at least "Medium" match.
+  * Target audience similarity strongly elevates the match confidence.
+  * If no clear audience or industry/product alignment exists, explicitly choose "No suitable match" to avoid forced or speculative matches.
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------
+
+--------LIST OF GOLDEN PARTNER SUMMARIES------------
+{{GOLDEN_PARTNER_SUMMARIES_PLACEHOLDER}}
+-----------END OF SUMMARIES-----------------

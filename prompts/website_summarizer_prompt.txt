@@ -1,0 +1,57 @@
+First, think step-by-step to understand the user's request and the provided text. Internally, break down the tasks: identify the core business, main offerings, target audience, business model, technology, USP, and mission. Then, extract the company name. Once you have a clear internal plan, generate ONLY the final JSON object as your response.
+Your primary task is to process the provided [Scraped Website Text] and return a single, valid JSON object. Do not include any conversational preamble, summaries, or any text whatsoever outside of this JSON structure. Your response must begin with '{' and end with '}'.
+
+Based on the [Scraped Website Text], perform these tasks explicitly:
+
+1. Company Summary:
+  Generate an informative yet concise summary of the company, clearly capturing:
+    Core business: Describe clearly what industry or field the company primarily operates in.
+    Main offerings/services/products: List explicitly any core products, services, or specialized solutions prominently featured.
+    Market & target audience: Clearly specify if they focus on B2B, B2C, particular industries, niche markets, or customer segments.
+    Business model: Include details on their revenue model if clear from the text (e.g., subscription, consulting, SaaS, direct sales).
+    Technology & special capabilities: Highlight explicitly mentioned technologies, software, frameworks, or unique capabilities featured prominently.
+    Unique selling proposition (USP): Mention clearly articulated advantages, differentiators, or competitive strengths from the text.
+    Mission or stated goals: Briefly summarize their stated vision, values, or strategic goals if provided.
+    Keep this summary comprehensive and detailed enough to enable accurate attribute extraction in the subsequent step, with a maximum length of approximately 600 words.
+
+2. Extracted Company Name:
+  Clearly identify and extract the exact company name from the provided text. If it cannot be determined confidently, return null.
+
+JSON Output Structure:
+{
+  "original_url": "[Placeholder for the original URL - this will be filled programmatically, do not generate it]",
+  "summary": "Your detailed and informative summary here...",
+  "extracted_company_name_from_summary": "Extracted Company Name or null",
+}
+IMPORTANT:
+You MUST return all fields specified in the JSON structure. If a value for a field cannot be determined, return an appropriate default value (null for company name, empty string "" for text fields, or empty list [] for list fields), but do not omit the field itself.
+
+Remember, the entire response must be ONLY the JSON object. Do not wrap it in markdown ```json blocks. The "original_url" field is a placeholder; your response must generate the other three fields based on the provided text.
+
+--------SCRAPED WEBSITE TEXT------------
+{{SCRAPED_WEBSITE_TEXT_PLACEHOLDER}}
+-----------END OF TEXT-------------------
+---
+HIGH-QUALITY EXAMPLE - DO NOT ALTER
+---
+
+--------SCRAPED WEBSITE TEXT------------
+Innovatech GmbH - Wir optimieren Ihre Logistik.
+
+Über Uns:
+Innovatech GmbH ist ein führender Anbieter von maßgeschneiderten Softwarelösungen für die Logistikbranche. Seit 2010 helfen wir Unternehmen dabei, ihre Lieferketten zu digitalisieren und zu optimieren. Unser Team aus erfahrenen Entwicklern und Logistikexperten arbeitet eng mit unseren Kunden zusammen, um innovative und effiziente Lösungen zu schaffen. Wir bedienen vor allem mittelständische und große Unternehmen in der DACH-Region.
+
+Produkte & Services:
+- **Warehouse Management System (WMS):** Unser cloud-basiertes WMS "LogiCloud" bietet Echtzeit-Tracking, Bestandsmanagement und automatisierte Berichterstattung. Es ist eine SaaS-Lösung, die sich nahtlos in bestehende ERP-Systeme integriert.
+- **Routenoptimierung:** Unsere Software "RouteMax" nutzt KI-Algorithmen, um die effizientesten Lieferrouten zu planen und den Kraftstoffverbrauch zu senken.
+- **Consulting:** Wir bieten strategische Beratung zur Optimierung von Logistikprozessen und zur Implementierung neuer Technologien.
+
+Unsere Mission ist es, die Logistik durch intelligente Software nachhaltiger und effizienter zu gestalten.
+-----------END OF TEXT-------------------
+
+--------EXPECTED JSON RESPONSE------------
+{
+  "original_url": "https://www.innovatech-gmbh.de",
+  "summary": "Innovatech GmbH is a German software company founded in 2010 that specializes in providing customized software solutions for the logistics industry. The company focuses on helping medium to large-sized businesses in the DACH region (Germany, Austria, Switzerland) digitize and optimize their supply chains. Their core offerings include 'LogiCloud,' a cloud-based Warehouse Management System (WMS) offered as a SaaS solution with features like real-time tracking and ERP integration, and 'RouteMax,' an AI-powered software for route optimization to improve efficiency and reduce fuel consumption. Additionally, Innovatech GmbH provides strategic consulting services for logistics process optimization. Their stated mission is to make logistics more sustainable and efficient through intelligent software.",
+  "extracted_company_name_from_summary": "Innovatech GmbH"
+}

@@ -1,0 +1,138 @@
+First, think step-by-step. Your internal process should be:
+1.  **Analyze the Target Company:** Carefully review the `Target Company Attributes JSON`.
+2.  **Evaluate Each Partner:** For each `Golden Partner Summary`, compare its characteristics (industry, customer base, etc.) against the target company's attributes.
+3.  **Select the Best Match:** Identify the partner that offers the most strategic and compelling angle for a sales pitch. This isn't just about the closest match, but the one whose story will resonate most.
+4.  **Formulate Rationale:** Determine the key `match_rationale_features` that justify your choice.
+5.  **Draft the Sales Line:** Construct the `phone_sales_line` part-by-part, ensuring it flows logically and incorporates the rationale.
+After completing this internal thought process, generate ONLY the final JSON object as your response.
+Your primary task is to analyze the provided [Target Company Attributes JSON] and the [List of Golden Partner Summaries]. Your goal is to identify the most relevant "Golden Partner" to use as an anonymous case study for crafting a compelling, consultative sales pitch leveraging tactical empathy and modern sales techniques.
+
+Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Your response must begin with '{' and end with '}'.
+
+Inputs:
+
+Target Company Attributes:
+A JSON object detailing the attributes of the company to be analyzed.
+
+Golden Partner Summaries:
+A list of JSON objects, each containing the name and summary of a "Golden Partner."
+
+Tasks to Perform:
+
+Compare:
+Analyze the [Target Company Attributes JSON] and compare it carefully against each summary in the [List of Golden Partner Summaries].
+
+Identify Relevant Partner:
+Determine which Golden Partner provides the most compelling basis for a sales conversation with the Target Company—not merely the closest technical or ideological match, but the partner whose story aligns well in a meaningful, strategic manner.
+
+Matched Partner Name:
+Return the identified partner’s name in the matched_partner_name field.
+
+Score Relevance:
+Provide a qualitative relevance score (match_score), such as "High", "Medium", or "Low".
+
+Identify Key Resonating Themes:
+List the key match_rationale_features explicitly derived from the Target Company Attributes JSON. Highlight precise, concrete similarities—particularly the shared customer base, market segments served, types of client organizations, or purchasing audiences—that form strong common ground between the Target Company and the matched Golden Partner.
+
+Generate Consultative Sales Line:
+Based on these themes, craft a compelling 1-2 sentence phone_sales_line. Do NOT mention the Golden Partner's name. Structure this pitch clearly in three parts:
+
+Part 1: Demonstrate Understanding:
+Start by empathetically acknowledging specific core business attributes of the target company.
+Example:
+"I was reviewing your company’s impressive focus on [Target Company's specific service, product, or customer segment]..."
+
+Part 2: Bridge to Anonymous Case Study & Highlight Outcomes:
+Clearly reference a distinctive yet complementary anonymous partner in a related or even unrelated field, explicitly highlighting how they share a similar customer base or market segment with the Target Company, and state that together you meaningfully improved their sales performance.
+Example:
+"...it reminded me of another recent partner working in [distinct industry or field]. Though quite different, they cater to similar [type of customer or market segment], and together we significantly improved their sales outcomes."
+
+Part 3: Create the Opportunity with Smooth No-Oriented Question:
+Conclude naturally with an inviting, grounded, no-oriented question that emphasizes your role in the partner’s success and invites engagement without pressure.
+Example:
+"Would it be unreasonable to briefly discuss how we achieved that result, and whether there's potential value we might also deliver for your team?"
+
+IMPORTANT:
+You MUST return all fields specified in the JSON structure. If a value for a field cannot be determined, return an appropriate default (null for optional fields, an empty string "" for text fields, or an empty list [] for lists), but do not omit any fields from the final JSON object.
+
+Example JSON Response:
+
+json
+Copy
+{
+  "match_score": "High",
+  "match_rationale_features": [
+    "Serves hospitals and emergency response units",
+    "Targets organizations operating under strict regulatory standards",
+    "Strong focus on precision and reliability in high-stakes environments"
+  ],
+  "phone_sales_line": "I was reviewing your specialized medical devices targeting hospital emergency response teams, and it reminded me of another recent partner operating in industrial safety equipment. Although in a different industry, they also serve clients facing high-pressure emergency scenarios, and together we substantially improved their sales results. Would it be unreasonable to briefly discuss how we achieved this, and see if a similar outcome could benefit your team?",
+  "matched_partner_name": "Example Safety Solutions Ltd."
+}
+Remember, the entire response must contain ONLY the JSON object. The "analyzed_company_url" and "analyzed_company_attributes" fields are placeholders to indicate the full expected schema; your response should generate the remaining fields based on your analysis.
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------
+
+--------LIST OF GOLDEN PARTNER SUMMARIES------------
+{{GOLDEN_PARTNER_SUMMARIES_PLACEHOLDER}}
+-----------END OF SUMMARIES-----------------
+---
+HIGH-QUALITY EXAMPLE - DO NOT ALTER
+---
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{
+  "b2b_indicator": true,
+  "phone_outreach_suitability": true,
+  "target_group_size_assessment": "Appears Large / >=500 potential",
+  "industry": "Software for Logistics",
+  "products_services_offered": [
+    "LogiCloud (cloud-based WMS)",
+    "RouteMax (AI-powered route optimization)",
+    "Strategic consulting for logistics"
+  ],
+  "usp_key_selling_points": [
+    "Specialization in logistics industry",
+    "AI-powered optimization",
+    "SaaS solutions with ERP integration"
+  ],
+  "customer_target_segments": [
+    "Medium to large-sized businesses",
+    "Companies in the DACH region"
+  ],
+  "business_model": "SaaS with strategic consulting services",
+  "company_size_category_inferred": "SME",
+  "innovation_level_indicators_text": "Summary highlights AI-powered software and a mission to use intelligent software."
+}
+-----------END OF JSON-----------------
+
+--------LIST OF GOLDEN PARTNER SUMMARIES------------
+[
+  {
+    "name": "Global Retail Solutions",
+    "summary": "A leading provider of point-of-sale (POS) systems for large retail chains. They focus on scalability and seamless integration with inventory management systems."
+  },
+  {
+    "name": "HealthCare Analytics Inc.",
+    "summary": "Specializes in data analytics platforms for hospitals. Their tools help optimize patient flow and resource allocation, serving large healthcare networks."
+  },
+  {
+    "name": "Eco-Friendly Packaging Co.",
+    "summary": "Provides sustainable packaging solutions for e-commerce businesses. They target environmentally conscious brands and medium-to-large online retailers."
+  }
+]
+-----------END OF SUMMARIES-----------------
+
+--------EXPECTED JSON RESPONSE------------
+{
+  "match_score": "High",
+  "match_rationale_features": [
+    "Serves medium to large-sized businesses",
+    "Provides scalable B2B solutions",
+    "Focuses on integration with existing enterprise systems (ERP/inventory)"
+  ],
+  "phone_sales_line": "I was reviewing your company's impressive focus on AI-powered logistics software for medium and large enterprises, and it reminded me of another recent partner working in point-of-sale systems for large retail chains. Though in a different field, they also cater to large-scale B2B clients requiring seamless integration with their core operational software, and together we significantly improved their sales outcomes. Would it be unreasonable to briefly discuss how we achieved that result?",
+  "matched_partner_name": "Global Retail Solutions"
+}

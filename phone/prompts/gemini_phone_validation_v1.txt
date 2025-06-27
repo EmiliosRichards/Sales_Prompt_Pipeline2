@@ -1,0 +1,80 @@
+IMPORTANT: Your sole task is to return a valid JSON object. Do not provide any conversational preamble, summaries, or any text whatsoever outside of the JSON structure. Your response must begin with '{' and end with '}' and contain nothing else.
+Optional Website Context (If Provided):
+Company Name: [Insert Company Name from Summary Here or "N/A"]
+Summary: [Insert Website Summary Here or "N/A"]
+Industry: [Insert Industry Here or "N/A"]
+---
+You will be provided with a list of candidate phone numbers. Each candidate includes the number itself, the source URL of the webpage where it was found, and a text snippet from that page showing the context around the number.
+
+Your task is to analyze each candidate and its context to:
+1. Determine the specific 'type' of the phone number (e.g., 'Main Line', 'Sales', 'Support', 'Fax', 'Mobile', 'Direct Dial', 'Customer Service', 'Headquarters', 'Non-Priority-Country Contact', 'Unknown').
+2. Assign a 'classification' to the phone number based on its quality and relevance:
+   - 'Primary': The most prominent, official, and general contact number for the company or main entity (e.g., mainline, headquarters). This is the top-quality contact.
+   - 'Secondary': Other important and useful business contact numbers (e.g., direct lines for key departments like Sales, main numbers for distinct branches or international offices). These are also good quality contacts.
+   - 'Support': Dedicated customer support, technical help, or service hotlines. A valid contact, but its utility for general business outreach might be lower if 'Primary' or 'Secondary' numbers exist.
+   - 'Low Relevance': Numbers verifiably business-related but not suitable for primary contact or general inquiry (e.g., Fax numbers, highly specialized internal lines not meant for public contact, or numbers with very limited utility if better alternatives are abundant).
+   - 'Non-Business': Numbers clearly personal, product identifiers, reference codes, or any number not serving as a business contact point. This includes numbers too ambiguous to be useful or appearing entirely irrelevant.
+
+Consider the source URL (e.g., a 'Contact Us' page is more likely to contain 'Best Match' numbers) and especially the text snippet for clues. The 'number' field you receive has been pre-formatted. The 'snippet' shows the original context; use it to verify if the digits truly represent a phone number or if they might originate from a date, product ID, or other non-telephony numerical data. While all business-related numbers should be classified, aim to assign 'Primary' or 'Secondary' classifications to numbers clearly linked to core business operations in Germany, Switzerland, or Austria. Business-related numbers from other countries might be typed as 'Non-Priority-Country Contact' and often classified as 'Low Relevance' or 'Support', unless they represent a significant international office.
+
+Input will be a list of items, each formatted as:
+{
+  "number": "E.164_formatted_number_found_by_regex",
+  "source_url": "URL_of_the_webpage_where_snippet_was_found",
+  "snippet": "Text snippet surrounding the number...",
+  "original_input_company_name": "Example Input Company Name"
+}
+
+Please provide your output as a single JSON object. This object MUST contain a key named "extracted_numbers", which is a list.
+EVERY item in the "extracted_numbers" list MUST be an object containing exactly three fields:
+1. "number": This MUST be the exact, unmodified 'number' string that was provided to you in the corresponding input candidate object. Do not alter it in any way.
+2. "type": Your determined type for the number (e.g., 'Main Line', 'Sales', 'Support', 'Fax', 'Mobile', 'Headquarters', 'Direct Dial', 'Customer Service', 'Non-Priority-Country Contact', 'Date', 'ID', 'Unknown').
+3. "classification": Your assigned classification ('Primary', 'Secondary', 'Support', 'Low Relevance', 'Non-Business'). If unsure, default to 'Non-Business' for classification but always include the field.
+
+Example of the expected output format:
+{
+  "extracted_numbers": [
+    {
+      "number": "+49301234567",
+      "type": "Main Line",
+      "classification": "Primary"
+    },
+    {
+      "number": "+49897654321",
+      "type": "Sales Department",
+      "classification": "Secondary"
+    },
+    {
+      "number": "+49301234568",
+      "type": "Fax",
+      "classification": "Low Relevance"
+    },
+    {
+      "number": "+41449876543",
+      "type": "Support Hotline",
+      "classification": "Support"
+    },
+    {
+      "number": "0800111222",
+      "type": "Customer Service",
+      "classification": "Support"
+    },
+    {
+      "number": "+442012345678",
+      "type": "Non-Priority-Country Contact",
+      "classification": "Low Relevance"
+    },
+    {
+      "number": "123456",
+      "type": "Unknown",
+      "classification": "Non-Business"
+    }
+  ]
+}
+
+For EVERY candidate number provided in the input list, you MUST include a corresponding entry in the 'extracted_numbers' list, **in the SAME order as the input**. The 'number' field in your output for each item MUST be identical to the 'number' field from the corresponding input candidate. Assign a 'type' and 'classification' to each.
+
+IMPORTANT: Your entire response MUST be ONLY the JSON object as specified. Do not include any other text, explanations, or markdown formatting (like ```json or ```) outside of the JSON object itself. The response should start with '{' and end with '}'.
+
+Candidate List:
+[Insert JSON list of (candidate_number, source_url, snippet) objects here]

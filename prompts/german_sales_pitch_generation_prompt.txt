@@ -1,0 +1,115 @@
+Your primary task is to generate a compelling, consultative sales pitch in German. You will be provided with the [Target Company Attributes JSON] and the [Matched Golden Partner JSON].
+
+Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Your response must begin with '{' and end with '}'.
+
+**Tasks to Perform:**
+
+1.  **Identify Key Rationale (in German):**
+    Generate an array called `match_rationale_features`.
+
+    Each item must describe specific, clear, and concrete similarities between the Target Company and Matched Golden Partner.
+
+    Acceptable similarities include:
+    *   Clearly overlapping customer segments
+    *   Similar products, services, or technology fields
+    *   Industry-specific regulatory or operational requirements
+
+    **Example of good rationale features:**
+    *   `"Gemeinsame Zielgruppe: Pflegeeinrichtungen, Kliniken und Gesundheitseinrichtungen"`
+    *   `"Ähnliche Produkte: KI-gestützte Softwarelösungen zur Prozessoptimierung im Gesundheitswesen"`
+
+    **Example of bad rationale (DO NOT produce these):**
+    *   `"Beide Unternehmen sind innovativ"` (too general)
+    *   `"Sie operieren im gleichen Marktsegment"` (not specific enough because segment is missing)
+
+2.  **Generate Consultative Sales Line (in German):**
+    *   Craft a compelling `phone_sales_line` in German.
+    *   Do NOT mention the Golden Partner's name.
+    *   Make sure to use clear, direct, and friendly language. Avoid overly formal or complicated expressions.
+--------PREVIOUS MATCH RATIONALE------------
+{{PREVIOUS_MATCH_RATIONALE_PLACEHOLDER}}
+-----------END OF RATIONALE-----------------
+    *   Use the following mandatory structure, where the `[Begründung]` is dynamically generated to mention the matched partner's industry and the shared customer base.
+
+**Mandatory Structure:**
+"Ich rufe Sie an, weil wir bereits sehr erfolgreich ein ähnliches Projekt umgesetzt haben – für ein Unternehmen aus dem Bereich [Produkt/Branche], das ebenfalls [gemeinsame Zielgruppe/Marktsegment] anspricht. Für dieses Unternehmen generieren wir täglich {programmatic placeholder} Leads und möchten gerne besprechen, wie wir das auch für Sie erreichen können."
+
+**CRITICAL INSTRUCTION:** The `{programmatic placeholder}` MUST NOT be altered or removed. It will be replaced by a script later.
+
+--- START OF FEW-SHOT EXAMPLE 1 ---
+
+**INPUT:**
+
+--------PREVIOUS MATCH RATIONALE------------
+- Gemeinsame Zielgruppe: Betreuungseinrichtungen, die sich an Senioren und Menschen mit kognitiven Beeinträchtigungen richten.
+- Ähnliche Produkte/Services: Interaktive Technologie zur Verbesserung der Lebensqualität und zur Förderung der kognitiven Fähigkeiten.
+- Fokus auf innovative Technologien zur Unterstützung von Menschen mit Mobilitätseinschränkungen und kognitiven Beeinträchtigungen.
+-----------END OF RATIONALE-----------------
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{
+  "input_summary_url": "https://www.exxomove.de/",
+  "b2b_indicator": true,
+  "phone_outreach_suitability": true,
+  "target_group_size_assessment": "Appears Medium",
+  "industry": "Assistive Technology",
+  "products_services_offered": [
+    "BATEO robotic arm",
+    "CARBONHAND hand orthosis"
+  ],
+  "usp_key_selling_points": [
+    "Solutions for arm and hand mobility",
+    "Designed to assist individuals with limited mobility",
+    "Improving quality of life and independence"
+  ],
+  "customer_target_segments": [
+    "Individuals with muscular dystrophy",
+    "Individuals with high spinal cord injuries",
+    "Individuals with other mobility impairments"
+  ],
+  "business_model": "Direct sales of assistive devices",
+  "company_size_indicators_text": null,
+  "company_size_category_inferred": "Unknown/Not Specified",
+  "innovation_level_indicators_text": "Summary mentions robotic arm and bionic hand orthosis, utilizing sensors and artificial tendons.",
+  "website_clarity_notes": "The business model and target audience are clearly articulated in the summary."
+}
+-----------END OF JSON-----------------
+
+--------MATCHED GOLDEN PARTNER JSON------------
+{
+  "name": "De BeleefTV",
+  "summary": "Industry: Healthcare Technology (specifically for care facilities, focusing on elder care and support for individuals with cognitive impairments like dementia); Services/Products: An interactive, mobile activity table (described as a \"giant iPad on wheels\") with specialized software; The software includes interactive games, music, memory exercises, and sensory activities.; Target Audience: Care facilities (e.g., nursing homes) catering to seniors and individuals with dementia or other cognitive impairments.; Business Model: Product-driven (sale of the interactive activity table with integrated software). They also offer a paid trial week, the cost of which is refunded upon purchase.; Company Size: Unknown/Not Specified; Innovation Level: Digital and interactive technology; Multi-touch screen; Specialized software co-developed with care facilities; Explicitly mentioned as using \"innovative Technologien\" (innovative technologies).",
+  "avg_leads_per_day": "10",
+  "rank": "5"
+}
+-----------END OF JSON-----------------
+
+**EXPECTED OUTPUT:**
+
+{
+  "match_rationale_features": [
+    "Gemeinsame Zielgruppe: Menschen mit eingeschränkter Mobilität, insbesondere durch Muskeldystrophie oder Rückenmarksverletzungen.",
+    "Ähnliche Produkte/Services: Technologien zur Verbesserung der Lebensqualität und Förderung der Unabhängigkeit von Menschen mit Mobilitätseinschränkungen.",
+    "Fokus auf innovative Technologien zur Unterstützung von Menschen mit Mobilitätseinschränkungen."
+  ],
+  "phone_sales_line": "Ich rufe Sie an, weil wir bereits sehr erfolgreich ein ähnliches Projekt umgesetzt haben – für ein Unternehmen aus dem Bereich Healthcare-Technologie, das sich auf interaktive Aktivitätstische für Pflegeeinrichtungen spezialisiert hat, die unter anderem auch Menschen mit kognitiven Beeinträchtigungen betreuen. Für dieses Unternehmen generieren wir täglich {programmatic placeholder} Leads und möchten gerne besprechen, wie wir das auch für Sie erreichen können."
+}
+
+--- END OF FEW-SHOT EXAMPLE 1 ---
+
+**JSON Response Format:**
+{
+  "match_rationale_features": [
+    "Gemeinsame Zielgruppe: Krankenhäuser, Kliniken und Personalabteilungen im Gesundheitswesen",
+    "Ähnliche Branchenanforderungen: Dienstplanung, Compliance-Software und regulatorische Sicherheit"
+  ],
+  "phone_sales_line": "Ich rufe Sie an, weil wir bereits sehr erfolgreich ein ähnliches Projekt umgesetzt haben – für ein Unternehmen aus dem Bereich Dienstplanungs- und Compliance-Software für Krankenhäuser und Kliniken, das sich insbesondere an Personalabteilungen im Gesundheitswesen richtet. Für dieses Unternehmen generieren wir täglich {programmatic placeholder} Leads und möchten gerne besprechen, wie wir das auch für Sie erreichen können."
+}
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------
+
+--------MATCHED GOLDEN PARTNER JSON------------
+{{MATCHED_GOLDEN_PARTNER_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------

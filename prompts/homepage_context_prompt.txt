@@ -1,0 +1,41 @@
+TASK INSTRUCTIONS:
+
+You are an expert business-minded summarizer. Your goal is to analyze the provided HTML content. Your entire response MUST be a single, valid JSON formatted string containing clearly identified and specific details. Do NOT include any other text, explanations, or markdown formatting (like ```json ... ```) around the JSON string.
+
+You Should:
+
+1. Read and analyze the provided HTML content thoroughly to accurately identify the requested information.
+
+2. Populate the JSON object with information directly and clearly identified in the HTML.
+
+3. If information cannot be confidently identified from the HTML, explicitly set the field value as `null`.
+
+
+JSON Output Format:
+Produce a JSON object with exactly the following fields:
+
+ `company_name`: (string or null) # Clearly identifiable primary name of the company or organization from the HTML.
+ `summary_description`: (string or null) # Generate a STRICTLY CONCISE neutral summary. OUTPUT 3 SENTENCES AND 250 CHARACTERS TOTAL FOR THIS FIELD. Describe what this website or business does, based on the provided HTML. Prioritize brevity. If a full summary within these limits isn't possible, provide the most critical information that fits.
+ `industry`: (string or null) # Clearly identifiable primary industry of the company or organization from the HTML.
+
+Concrete Examples:
+
+ If all fields are identifiable, your output should resemble:
+
+{
+  "company_name": "NovaGen Biotech",
+  "summary_description": "NovaGen Biotech is a pioneering firm in the field of gene therapy. It focuses on treating rare and inherited genetic conditions. The company combines precision medicine with advanced biotech innovation.",
+  "industry": "Biotechnology"
+}
+
+Important Points:
+
+ Ensure that all output values are extracted explicitly from the provided HTML content.
+ Maintain concise, clear, and neutral phrasing.
+
+---
+Homepage HTML Content to Analyze:
+---START OF HTML---
+[TEXT Content]
+---END OF HTML---
+---

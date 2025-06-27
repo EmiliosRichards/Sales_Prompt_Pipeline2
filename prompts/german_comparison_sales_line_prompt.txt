@@ -1,0 +1,95 @@
+First, follow this structured internal thought process step-by-step:
+
+1. Analyze Target Company:
+Carefully evaluate the provided Target Company Attributes JSON.
+
+2. Compare Partners:
+Analyze each entry in the provided Golden Partner Summaries, specifically looking at industry overlap, shared customer segments, or similar strategic market positions.
+
+3. Select Best Match:
+Choose the partner whose case provides the strongest strategic comparison for a compelling sales pitch.
+
+4. Define Rationale (German):
+Clearly outline the key rationale features (match_rationale_features) in German, specifically highlighting shared industries, customer segments, markets, or strategic attributes.
+
+5. Craft Sales Line (German):
+Strictly follow the predefined pitch format below, filling in only the dynamic [Begründung] part based explicitly on the matched partner’s attributes.
+Do NOT deviate from this structure:
+
+After completing this internal thought process, generate ONLY the final JSON object as your response.
+Your primary task is to analyze the provided [Target Company Attributes JSON] and the [List of Golden Partner Summaries]. Your goal is to identify the most relevant "Golden Partner" to use as an anonymous case study for crafting a compelling, consultative sales pitch in German.
+
+Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Your response must begin with '{' and end with '}'.
+
+Inputs:
+
+Target Company Attributes:
+A JSON object detailing the attributes of the company to be analyzed.
+
+Golden Partner Summaries:
+A list of JSON objects, each containing the name and summary of a "Golden Partner."
+
+Tasks to Perform:
+
+Compare:
+Analyze the [Target Company Attributes JSON] and compare it carefully against each summary in the [List of Golden Partner Summaries].
+
+Identify Relevant Partner:
+Determine which Golden Partner provides the most compelling basis for a sales conversation.
+
+**CRITICAL MATCHING CRITERIA:**
+1.  **Primary Filter: Shared Industry/Audience.** You MUST prioritize partners that share a similar `industry` or `target_audience` with the Target Company. This is the most important factor.
+2.  **Secondary Filter: Rank.** If multiple partners share a similar industry/audience, use the `rank` as a tie-breaker.
+3.  **No Match Condition.** If NO partner shares a reasonably similar industry or target audience, you MUST return "No suitable match found" for the `matched_partner_name` and a `match_score` of "Low". Do not force a match.
+Matched Partner Name:
+Return the identified partner’s name in the matched_partner_name field.
+
+Score Relevance:
+Provide a qualitative relevance score (match_score), such as "High", "Medium", or "Low".
+
+Identify match_rationale_feature (in German):
+List the key match_rationale_features in German, explicitly derived from the Target Company Attributes JSON. Highlight precise, concrete similarities—particularly the shared customer base, market segments served, types of client organizations, or purchasing audiences—that form strong common ground between the Target Company and the matched Golden Partner.
+
+Generate Consultative Sales Line (in German):
+Based on these themes, craft a compelling phone_sales_line in German. Do NOT mention the Golden Partner's name. Structure this pitch in two parts:
+
+Mandatory Structure:
+Use the following structure, where the [Begründung] is dynamically generated to mention the matched partner's industry and the shared customer base.
+Structure:
+"Ich rufe Sie an, weil wir bereits ein ähnliches Projekt sehr erfolgreich telefoniert haben, und zwar [Begründung]. Wir haben für dieses Unternehmen {programmatic placeholder} Leads pro Tag generiert und möchten mit Ihnen besprechen, wie wir ähnliche Ergebnisse für Sie erzielen können."
+Example [Begründung]:
+
+"für ein Unternehmen, das [Produkt/Branche des Partners] anbietet und ebenfalls [kurze Beschreibung der gemeinsamen Kundenzielgruppe oder des Marktsegments] bedient.“
+
+Important Clarifications:
+
+All segments of the sales line (except [Begründung]) must remain exactly as provided in the mandatory structure.
+
+[Begründung] must briefly and clearly reflect the matched partner’s industry and explicitly mention the shared customer base or market segment.
+
+{programmatic placeholder} will be programmatically filled and should remain unchanged.
+
+Omit conversational preamble or explanations. Provide ONLY the required JSON object starting with { and ending with }.
+
+Example JSON Response:
+
+{
+  "match_score": "High",
+  "match_rationale_features": [
+    "Gemeinsame Zielgruppe: Krankenhäuser, Kliniken und Personalabteilungen im Gesundheitswesen",
+    "Ähnliche Branchenanforderungen: Dienstplanung, Compliance-Software und regulatorische Sicherheit",
+    "Vergleichbare strategische Ansätze oder Lösungen: Account-Based Marketing kombiniert mit Outbound-Telefonie zur Lead-Generierung"
+  ],
+  "phone_sales_line": "Ich rufe Sie an, weil wir bereits ein ähnliches Projekt sehr erfolgreich umgesetzt haben – für ein Unternehmen, das Software für Dienstplanung und Compliance speziell für Krankenhäuser und Kliniken anbietet und zudem Personalabteilungen im erweiterten Gesundheitswesen bedient. Für dieses Unternehmen haben wir {programmatic placeholder} Leads pro Tag generiert und möchten mit Ihnen besprechen, wie wir ähnliche Ergebnisse auch für Sie erzielen können.",
+  "matched_partner_name": "MediPlan Solutions AG"
+}
+
+Remember, the entire response must contain ONLY the JSON object. The "analyzed_company_url" and "analyzed_company_attributes" fields are placeholders to indicate the full expected schema; your response should generate the remaining fields based on your analysis.
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------
+
+--------LIST OF GOLDEN PARTNER SUMMARIES------------
+{{GOLDEN_PARTNER_SUMMARIES_PLACEHOLDER}}
+-----------END OF SUMMARIES-----------------

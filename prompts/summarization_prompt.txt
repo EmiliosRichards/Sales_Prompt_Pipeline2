@@ -1,0 +1,9 @@
+Provide exactly these fields from the TEXT explicitly. Do not explain or summarize generally beyond schema:
+
+- company_name: exact name from HTML or null
+- summary_description: A summary, STRICT MAXIMUM 250 characters, or null 
+- industry: primary industry or null
+
+---START OF TEXT---
+[TEXT Content]
+---END OF TEXT---

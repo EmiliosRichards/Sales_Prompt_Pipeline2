@@ -1,0 +1,66 @@
+Website Summary: [Insert Website Summary Here]
+
+---
+
+**Task:** Analyze the provided text (typically from a webpage) in conjunction with the Website Summary above. Your goal is to perform an enriched extraction of contact information.
+
+**Primary Objective: Extract Phone Numbers**
+Identify all phone numbers present in the text. For each phone number, provide:
+1.  `number`: The phone number, normalized to E.164 international format if possible (e.g., "+12125551234").
+2.  `type`: The perceived type or context of the phone number (e.g., "Main Line", "Sales", "Customer Support", "Fax", "Mobile").
+3.  `classification`: Your assessment of the number's quality and relevance (e.g., 'Primary Contact', 'Secondary Contact', 'General Inquiry', 'Support Line', 'Low Relevance', 'Non-Business').
+
+**Secondary Objective: Extract Additional Associated Information**
+In addition to phone numbers, extract any associated contact details or contextual information if they are present near the phone numbers or clearly related to a contact person or department. This includes:
+*   Email addresses
+*   Names of individuals
+*   Job titles or roles
+*   Departments
+
+**Output Structure:**
+Please structure your entire output as a single JSON object that can be parsed into the following Pydantic model structure. Pay close attention to the field names and data types.
+
+```json
+{
+  "extracted_numbers": [
+    {
+      "number": "string (E.164 format)",
+      "type": "string (e.g., 'Sales', 'Support')",
+      "classification": "string (e.g., 'Primary Contact')"
+    }
+    // ... more numbers
+  ],
+  "additional_info": [
+    {
+      "info_type": "string (e.g., 'email', 'name', 'role', 'department')",
+      "value": "string or list/dict (actual information)",
+      "associated_number": "string (E.164 format, if directly linked to a number, otherwise null)",
+      "source_context": "string (brief snippet where info was found, optional)",
+      "confidence": "float (0.0 to 1.0, your confidence, optional)"
+    }
+    // ... more additional info items
+  ],
+  "homepage_summary": "string (This MUST be the 'Website Summary' provided at the top of this prompt)",
+  "overall_confidence": "float (0.0 to 1.0, your overall confidence in the entire extraction)",
+  "processing_notes": [
+    "string (any notes about your reasoning or difficulties)"
+  ],
+  "raw_source_text_snippet": "string (a relevant snippet of the original text, if applicable)"
+}
+```
+
+**Detailed Instructions for `additional_info`:**
+*   For each piece of additional information (like an email, a person's name, or their role), create a separate object in the `additional_info` list.
+*   `info_type`: Clearly state what kind of information it is (e.g., "email", "name", "role", "department").
+*   `value`: The actual extracted data.
+*   `associated_number`: If this piece of information is directly and clearly associated with one of the extracted phone numbers, include that phone number here (in E.164 format). If it's general information or not tied to a specific number, you can omit this field or set it to null.
+*   `source_context`: Optionally, include a very brief snippet of text surrounding where you found this piece of information to help with traceability.
+*   `confidence`: Optionally, provide a confidence score (0.0 to 1.0) for this specific piece of additional information.
+
+**LLM Assessment Mindset for `additional_info`:**
+Reason about the context. If a name, role, and email appear together with a phone number, they are likely associated. If they appear in a general "Contact Us" section without a specific person, they might be general contact details. Use your judgment to decide how to best structure this information. The goal is to capture as much relevant, contextually-linked information as possible.
+
+**Crucial Reminder for `homepage_summary`:**
+The `homepage_summary` field in your JSON output MUST be populated with the exact "Website Summary" that is provided at the very beginning of this prompt. Do not generate a new summary; reuse the one given.
+
+Analyze the input text carefully and provide a comprehensive and accurately structured JSON output.

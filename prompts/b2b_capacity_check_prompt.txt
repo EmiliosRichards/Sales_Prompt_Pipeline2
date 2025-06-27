@@ -1,0 +1,20 @@
+You are an expert business analyst. Your task is to analyze the provided summary of a company's website and determine two key factors:
+1.  Whether the company is primarily a Business-to-Business (B2B) entity.
+2.  Whether the company's products or services are structured in a way that it could potentially serve 1,000 or more customers.
+
+Analyze the following website summary:
+---
+{{WEBSITE_SUMMARY_TEXT_PLACEHOLDER}}
+---
+
+Based on your analysis, provide a response in a single, valid JSON object. The JSON object must conform to the following structure:
+{
+  "is_b2b": "Yes",
+  "serves_1000_customers": "No"
+}
+
+Instructions for your response:
+- The value for "is_b2b" must be one of "Yes", "No", or "Unknown".
+- The value for "serves_1000_customers" must be one of "Yes", "No", or "Unknown".
+- "Yes" for "serves_1000_customers" means the business model (e.g., SaaS, mass-produced goods, scalable services) allows for a large customer base, not that they currently have that many. A small local bakery would be "No", while a new software startup would be "Yes".
+- Do NOT include any explanations, markdown formatting (like ```json), or any other text outside of the JSON string.

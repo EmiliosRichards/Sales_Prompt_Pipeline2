@@ -1,0 +1,26 @@
+# Core Dependencies
+pandas
+pandas-stubs
+phonenumbers
+dotenv
+playwright
+beautifulsoup4
+tldextract
+requests
+google-generativeai
+google-api-core
+pydantic
+openpyxl
+tenacity
+
+# Notes:
+# 1. After installing these requirements, you must also run `playwright install`
+#    to download the necessary browser binaries for Playwright.
+# 2. If your IDE (e.g., VS Code with Pylance) shows errors like
+#    "Import 'phonenumbers' could not be resolved" or for other packages,
+#    ensure that:
+#    a) You have activated the correct Python virtual environment where these
+#       packages were installed.
+#    b) Your IDE is configured to use that virtual environment's Python interpreter.
+#    c) You have run `pip install -r requirements.txt` in that environment.
+httpx>=0.20.0
