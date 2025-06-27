@@ -1,3 +1,6 @@
+**/.env*
+# Ignore environment variable files
+.env.local
 .env 
 data/final_80k.csv
 
