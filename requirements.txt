@@ -12,6 +12,8 @@ google-api-core
 pydantic
 openpyxl
 tenacity
+pytest
+trio
 
 # Notes:
 # 1. After installing these requirements, you must also run `playwright install`
@@ -24,3 +26,5 @@ tenacity
 #    b) Your IDE is configured to use that virtual environment's Python interpreter.
 #    c) You have run `pip install -r requirements.txt` in that environment.
 httpx>=0.20.0
+python-dotenv
+slack_sdk

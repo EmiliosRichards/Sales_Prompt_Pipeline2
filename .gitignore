@@ -25,3 +25,7 @@ venv/
 test_output.txt
 # Ignore temporary files
 *.tmp
+
+cache/
+
+output_data/

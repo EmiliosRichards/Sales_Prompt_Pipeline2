@@ -269,7 +269,8 @@ async def scrape_website(
     output_dir_for_run: str,
     company_name_or_id: str,
     globally_processed_urls: Set[str],
-    input_row_id: Any
+    input_row_id: Any,
+    run_id: str
 ) -> Tuple[List[Dict[str, str]], str, Optional[str], Optional[str]]: # Added Optional[str] for summary text
     start_time = time.time()
     log_identifier = f"[RowID: {input_row_id}, Company: {company_name_or_id}]"
@@ -277,7 +278,7 @@ async def scrape_website(
 
     # --- Caching Logic: Check before scraping ---
     if config_instance.caching_enabled:
-        cache_key = generate_cache_key(given_url)
+        cache_key = generate_cache_key(given_url, company_name_or_id, run_id)
         cached_results = load_from_cache(cache_key, config_instance.cache_dir)
         if cached_results is not None:
             logger.info(f"{log_identifier} Scrape data for '{given_url}' loaded from cache.")
@@ -321,7 +322,7 @@ async def scrape_website(
     async with async_playwright() as p, httpx.AsyncClient(follow_redirects=True, verify=False) as http_client_for_validation:
         browser = None
         try:
-            launch_options: Dict[str, Any] = {'headless': False}
+            launch_options: Dict[str, Any] = {'headless': True}
             proxy_manager = None
             proxy_to_use = None
 
@@ -363,7 +364,7 @@ async def scrape_website(
                     if browser.is_connected(): await browser.close()
                     # --- Caching Logic: Save after scraping ---
                     if config_instance.caching_enabled and status == "Success":
-                        cache_key = generate_cache_key(given_url)
+                        cache_key = generate_cache_key(given_url, company_name_or_id, run_id)
                         # Add summary text to the data being cached
                         if details:
                             details[0]['summary_text'] = collected_summary_text
@@ -485,7 +486,8 @@ async def _test_scraper():
        test_run_output_dir, # This is the base for the run, scrape_website will make subdirs
        "example_company_test",
        globally_processed_urls_for_test,
-       "TEST_ROW_ID_001" # Added placeholder for input_row_id
+       "TEST_ROW_ID_001", # Added placeholder for input_row_id
+       test_run_id
     )
 
     if scraped_items_with_type:

@@ -1,0 +1,70 @@
+You are an expert data extractor. Your task is to analyze text snippets from a German website that contain potential phone numbers and determine their validity, type, and classification. You must be very specific and avoid using "Unknown" unless absolutely necessary.
+
+**Analysis Guidelines:**
+
+1.  **Validity (`is_valid`)**:
+    *   **true**: The number is a plausible phone number.
+    *   **false**: The number is clearly not a phone number (e.g., an order number, ID, too short/long).
+
+2.  **Type (`type`)**:
+    *   Categorize the number based on its context. Examples: "Sales", "Support", "Hotline", "Main Office", "Fax", "Mobile", "Direct Dial", "Unknown".
+
+3.  **Classification (`classification`)**:
+    *   **"Primary"**: The number seems to be a main contact point for the business (e.g., Main Office, Sales Hotline). If a number is presented prominently, it is likely "Primary".
+    *   **"Secondary"**: The number is for a specific, non-primary purpose (e.g., a direct dial for a specific person, a secondary support line).
+    *   **"Non-Business"**: The number is clearly not for business contact (e.g., a private number mentioned in a blog post).
+
+**Input Snippets:**
+A JSON list of potential numbers and the text surrounding them.
+---
+{{PHONE_CANDIDATES_JSON_PLACEHOLDER}}
+---
+
+**Output Format:**
+Respond with a JSON object containing a single key "extracted_numbers" which holds a list of JSON objects. Each object must match the schema for one of the input numbers.
+{{
+    "extracted_numbers": [
+        {{
+            "number": "The original number string",
+            "source_url": "The URL where the number was found",
+            "is_valid": true/false,
+            "type": "e.g., Sales",
+            "classification": "e.g., Primary"
+        }}
+    ]
+}}
+
+---
+HIGH-QUALITY EXAMPLE - DO NOT ALTER
+---
+
+--------WEBSITE SUMMARY TEXT------------
+Die Exxomove GmbH ist ein führendes Logistikunternehmen, das umfassende Transport- und Lieferlösungen für Geschäftskunden in ganz Deutschland anbietet. Unser Service-Center ist rund um die Uhr erreichbar, um Ihre Anfragen zu bearbeiten. Kontaktieren Sie uns unter +49 (0) 123 456-7890 für ein individuelles Angebot. Für direkte Anfragen an unsere Vertriebsabteilung wählen Sie bitte +49 (0) 123 456-7891. Wir sind auch per Fax erreichbar: +49 (0) 123 456-7892.
+-----------END OF TEXT-----------------
+
+--------EXPECTED JSON RESPONSE------------
+{{
+    "extracted_numbers": [
+        {{
+            "number": "+49 (0) 123 456-7890",
+            "source_url": "https://www.exxomove.de/",
+            "is_valid": true,
+            "type": "Main Office",
+            "classification": "Primary"
+        }},
+        {{
+            "number": "+49 (0) 123 456-7891",
+            "source_url": "https://www.exxomove.de/",
+            "is_valid": true,
+            "type": "Sales",
+            "classification": "Secondary"
+        }},
+        {{
+            "number": "+49 (0) 123 456-7892",
+            "source_url": "https://www.exxomove.de/",
+            "is_valid": true,
+            "type": "Fax",
+            "classification": "Secondary"
+        }}
+    ]
+}}

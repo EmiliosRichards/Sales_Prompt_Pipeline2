@@ -36,7 +36,7 @@ class InteractionHandler:
                     else: # text
                         element = self.page.locator(f"*:visible:text-matches('{query}', 'i')").first
                     
-                    if await element.is_visible(timeout=visibility_timeout):
+                    if await element.is_visible():
                         logger.info(f"Found and clicking element by {type}: '{query}'")
                         await element.click(timeout=1000)
                         handled_in_pass = True

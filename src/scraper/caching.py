@@ -6,13 +6,17 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-def generate_cache_key(url: str) -> str:
+def generate_cache_key(url: str, company_name: str, run_id: str) -> str:
     """
-    Generates a safe and unique filename key for a given URL.
+    Generates a safe and unique filename key for a given URL, company name, and run ID.
     """
-    # Normalize URL to ensure consistency and hash it for a safe filename
+    # Normalize URL and company name to ensure consistency
     normalized_url = url.strip().lower()
-    return hashlib.sha256(normalized_url.encode('utf-8')).hexdigest()
+    normalized_company_name = company_name.strip().lower()
+    
+    # Create a combined string and hash it for a safe filename
+    combined_key = f"{normalized_url}-{normalized_company_name}-{run_id}"
+    return hashlib.sha256(combined_key.encode('utf-8')).hexdigest()
 
 def load_from_cache(key: str, cache_dir: str) -> Optional[List[Dict[str, Any]]]:
     """

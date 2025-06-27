@@ -21,19 +21,21 @@ def write_sales_outreach_report(
     output_dir: str,
     run_id: str,
     original_df: pd.DataFrame,
-    sales_prompt_path: Optional[str] = None
+    sales_prompt_path: Optional[str] = None,
+    output_format: str = 'csv'
 ) -> Optional[str]:
     """
-    Writes the sales outreach data to a CSV file.
+    Writes the sales outreach data to a CSV or Excel file.
 
     Args:
         output_data (List[GoldenPartnerMatchOutput]): A list of GoldenPartnerMatchOutput objects.
-        output_dir (str): The directory where the CSV file will be saved.
+        output_dir (str): The directory where the file will be saved.
         run_id (str): The unique identifier for the current run.
         original_df (pd.DataFrame): The original input DataFrame.
+        output_format (str): The output format, either 'csv' or 'excel'.
 
     Returns:
-        Optional[str]: The full path to the saved CSV file, or None if an error occurred.
+        Optional[str]: The full path to the saved file, or None if an error occurred.
     """
     if not output_data:
         logger.warning("No output data provided to write_sales_outreach_report. Skipping CSV generation.")
@@ -41,47 +43,65 @@ def write_sales_outreach_report(
 
     try:
         os.makedirs(output_dir, exist_ok=True)
-        filename = f"SalesOutreachReport_{run_id}.csv"
+        if output_format == 'excel':
+            filename = f"SalesOutreachReport_{run_id}.xlsx"
+        else:
+            filename = f"SalesOutreachReport_{run_id}.csv"
         full_path = os.path.join(output_dir, filename)
 
         report_data = []
         
 
         # Create a mapping from URL to original row for efficient lookup
-        original_df_map = {row.get('GivenURL'): row for index, row in original_df.iterrows()}
+        original_df_map = {}
+        for i in range(len(original_df)):
+            row_series = original_df.iloc[i]
+            row_dict = row_series.to_dict()
+            # Adding 2 because header is 1 and index is 0-based
+            row_dict['original_row_number'] = i + 2
+            url = row_series.get('GivenURL')
+            if url:
+                original_df_map[url] = row_dict
 
         for item in output_data:
             original_url = item.analyzed_company_url
-            original_row = original_df_map.get(original_url)
+            original_row_data = original_df_map.get(original_url)
 
             attrs = item.analyzed_company_attributes if item else None
             
             # Initialize a base row structure
             row = {
-                'Company Name': None, 'Number': None, 'URL': original_url,
-                'is_b2b': None, 'serves_1000': None, 'found_number': None,
+                'Company Name': None, 'Original_Number': None, 'URL': original_url,
+                'is_b2b': None, 'is_b2b_reason': None,
+                'serves_1000': None, 'serves_1000_reason': None,
+                'found_number': None,
                 'sales_pitch': None, 'description': None, 'matched_golden_partner': None,
                 'match_reasoning': None,
-                'Industry': None, 'Sales Line': '',
-                'Key Resonating Themes': '', 'Matched Partner Name': '',
+                'Industry': None,
                 'Matched Partner Description': '', 'Avg Leads Per Day': '',
-                'Rank': '', 'Match Score': '', 'B2B Indicator': '',
+                'Rank': '', 'B2B Indicator': '',
                 'Phone Outreach Suitability': '', 'Target Group Size Assessment': '',
                 'Products/Services Offered': '', 'USP/Key Selling Points': '',
                 'Customer Target Segments': '', 'Business Model': '',
                 'Company Size Inferred': '', 'Innovation Level Indicators': '',
-                'Website Clarity Notes': ''
+                'Website Clarity Notes': '',
+                'Original Row Number': None,
+                'ScrapeStatus': None
             }
 
-            if original_row is not None:
+            if original_row_data is not None:
                 row.update({
-                    'Company Name': original_row.get('CompanyName'),
-                    'Number': original_row.get('PhoneNumber'),
-                    'Description': original_row.get('Description'),
-                    'Industry': original_row.get('Industry'),
-                    'is_b2b': original_row.get('is_b2b'),
-                    'serves_1000': original_row.get('serves_1000'),
-                    'found_number': original_row.get('found_number'),
+                    'Company Name': original_row_data.get('CompanyName'),
+                    'Original_Number': original_row_data.get('Original_Number') or original_row_data.get('PhoneNumber') or original_row_data.get('Number'),
+                    'description': original_row_data.get('Description'),
+                    'Industry': original_row_data.get('Industry'),
+                    'is_b2b': original_row_data.get('is_b2b'),
+                    'is_b2b_reason': original_row_data.get('is_b2b_reason'),
+                    'serves_1000': original_row_data.get('serves_1000'),
+                    'serves_1000_reason': original_row_data.get('serves_1000_reason'),
+                    'found_number': original_row_data.get('found_number'),
+                    'Original Row Number': original_row_data.get('original_row_number'),
+                    'ScrapeStatus': original_row_data.get('ScrapingStatus'),
                 })
 
             if item:
@@ -93,7 +113,6 @@ def write_sales_outreach_report(
                     'Matched Partner Description': item.matched_partner_description or '',
                     'Avg Leads Per Day': item.avg_leads_per_day if item.avg_leads_per_day is not None else '',
                     'Rank': item.rank if item.rank is not None else '',
-                    'Match Score': item.match_score,
                 })
 
             if attrs:
@@ -118,8 +137,12 @@ def write_sales_outreach_report(
             return None
 
         df = pd.DataFrame(report_data)
-        df.to_csv(full_path, index=False, encoding='utf-8-sig')
-        logger.info(f"Successfully wrote sales outreach report to CSV: {full_path}")
+        if output_format == 'excel':
+            df.to_excel(full_path, index=False)
+            logger.info(f"Successfully wrote sales outreach report to Excel: {full_path}")
+        else:
+            df.to_csv(full_path, index=False, encoding='utf-8-sig')
+            logger.info(f"Successfully wrote sales outreach report to CSV: {full_path}")
         return full_path
 
     except Exception as e:

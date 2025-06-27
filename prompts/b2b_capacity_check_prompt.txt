@@ -1,20 +1,27 @@
-You are an expert business analyst. Your task is to analyze the provided summary of a company's website and determine two key factors:
-1.  Whether the company is primarily a Business-to-Business (B2B) entity.
-2.  Whether the company's products or services are structured in a way that it could potentially serve 1,000 or more customers.
+You are an expert business analyst. Your task is to determine if a company is primarily B2B and if it has the capacity to serve over 1,000 customers, based *only* on the text provided.
 
-Analyze the following website summary:
+**Analysis Guidelines:**
+
+1.  **B2B Status (`is_b2b`)**:
+    *   **"Yes"**: The company primarily sells products or services to other businesses. This includes services like logistics, business consulting, software for companies, and wholesale goods. Keywords: "B2B", "enterprise", "business solutions", "for companies", "partners", "wholesale", "distributor", "logistics", "supply chain". A company serving both consumers and businesses is still "Yes" if a significant B2B offering is mentioned.
+    *   **"No"**: The company primarily sells to individual consumers (B2C). Keywords: "personal use", "for individuals", "shop now" (in a retail context).
+    *   **"Unknown"**: The text does not provide enough information to make a clear determination.
+
+2.  **Capacity Status (`serves_1000_customers`)**:
+    *   **"Yes"**: The company shows evidence of scale or operates in an industry that implies scale. This includes software (SaaS), manufacturing, e-commerce platforms, and logistics/transportation networks. Keywords: "enterprise", "scalable", "global", "thousands of customers", "large-scale", "platform", "network", "multiple locations", "branches". The potential to serve many customers is more important than the current number. If the text is ambiguous but suggests a non-local operation (e.g., multiple offices), you should default to "Yes".
+    *   **"No"**: The company appears small or localized. Keywords: "small team", "local", "boutique", "serving our community", "10 employees". A local restaurant or small consultancy typically falls here.
+    *   **"Unknown"**: Use this only when there is a complete lack of information regarding the company's scale or scope. If there are any hints of a larger operation, prefer "Yes".
+
+**Input Text:**
 ---
 {{WEBSITE_SUMMARY_TEXT_PLACEHOLDER}}
 ---
 
-Based on your analysis, provide a response in a single, valid JSON object. The JSON object must conform to the following structure:
-{
-  "is_b2b": "Yes",
-  "serves_1000_customers": "No"
-}
-
-Instructions for your response:
-- The value for "is_b2b" must be one of "Yes", "No", or "Unknown".
-- The value for "serves_1000_customers" must be one of "Yes", "No", or "Unknown".
-- "Yes" for "serves_1000_customers" means the business model (e.g., SaaS, mass-produced goods, scalable services) allows for a large customer base, not that they currently have that many. A small local bakery would be "No", while a new software startup would be "Yes".
-- Do NOT include any explanations, markdown formatting (like ```json), or any other text outside of the JSON string.
+**Output Format:**
+Respond with a JSON object matching this schema. Provide a concise reason for each decision, quoting from the text if possible.
+{{
+    "is_b2b": "Yes", "No", or "Unknown",
+    "is_b2b_reason": "Brief explanation for the B2B status decision.",
+    "serves_1000_customers": "Yes", "No", or "Unknown",
+    "serves_1000_customers_reason": "Brief explanation for the capacity decision."
+}}

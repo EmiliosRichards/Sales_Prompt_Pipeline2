@@ -110,7 +110,9 @@ class B2BAnalysisOutput(BaseModel):
     Structures the output of the B2B and customer capacity analysis LLM call.
     """
     is_b2b: str = Field(description="Indicates if the company is B2B. Must be 'Yes', 'No', or 'Unknown'.")
+    is_b2b_reason: Optional[str] = Field(default=None, description="The reason for the B2B classification.")
     serves_1000_customers: str = Field(description="Indicates if the company can serve 1000+ customers. Must be 'Yes', 'No', or 'Unknown'.")
+    serves_1000_customers_reason: Optional[str] = Field(default=None, description="The reason for the serves_1000_customers classification.")
 
 class DetailedCompanyAttributes(BaseModel):
     """
@@ -143,7 +145,7 @@ class GoldenPartnerMatchOutput(BaseModel):
     results against Golden Partners and a generated sales line.
     """
     analyzed_company_url: str = Field(description="The original URL of the company that was analyzed.")
-    analyzed_company_attributes: DetailedCompanyAttributes = Field(description="The full set of detailed attributes extracted for the analyzed company in a previous LLM call.")
+    analyzed_company_attributes: Optional[DetailedCompanyAttributes] = Field(default=None, description="The full set of detailed attributes extracted for the analyzed company in a previous LLM call.")
     summary: Optional[str] = Field(default=None, description="The summary of the analyzed company.")
     match_score: Optional[Union[int, float, str]] = Field(default=None, description="Score (e.g., 0-10, 0.0-1.0, or 'High/Medium/Low') indicating the strength of the match with the closest Golden Partner.")
     match_rationale_features: Optional[List[str]] = Field(default_factory=list, description="List of key shared features or reasons provided by the LLM for the match.")
@@ -152,3 +154,4 @@ class GoldenPartnerMatchOutput(BaseModel):
     matched_partner_description: Optional[str] = Field(default=None, description="The summary of the matched golden partner.")
     avg_leads_per_day: Optional[float] = Field(default=None, description="Average number of leads per day for the matched partner.")
     rank: Optional[int] = Field(default=None, description="Rank of the matched partner (1-47).")
+    scrape_status: Optional[str] = Field(default=None, description="The status of the scraping attempt.")

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 def check_b2b_and_capacity(
     gemini_client: GeminiClient,
     config: AppConfig,
-    website_summary: str,
+    company_text: str,
     llm_context_dir: str,
     llm_requests_dir: str,
     file_identifier_prefix: str,
@@ -36,7 +36,7 @@ def check_b2b_and_capacity(
     Args:
         gemini_client: The Gemini client for API interactions.
         config: The application configuration object (`AppConfig`).
-        website_summary: The summary of the company's website.
+        company_text: The text content to be analyzed (can be a summary or full text).
         llm_context_dir: Directory to save LLM interaction artifacts.
         llm_requests_dir: Directory to save LLM request payloads.
         file_identifier_prefix: Prefix for naming saved artifact files.
@@ -59,7 +59,7 @@ def check_b2b_and_capacity(
 
     try:
         prompt_template = load_prompt_template(prompt_template_path)
-        formatted_prompt = prompt_template.replace("{{WEBSITE_SUMMARY_TEXT_PLACEHOLDER}}", website_summary)
+        formatted_prompt = prompt_template.replace("{{WEBSITE_SUMMARY_TEXT_PLACEHOLDER}}", company_text)
     except Exception as e:
         logger.error(f"{log_prefix} Failed to load/format B2B capacity check prompt: {e}", exc_info=True)
         return None, f"Error: Failed to load/format prompt - {str(e)}", token_stats
@@ -112,7 +112,7 @@ def check_b2b_and_capacity(
         "model_name": config.llm_model_name,
         "system_instruction": system_instruction_text,
         "user_contents": contents_for_api,
-        "generation_config": generation_config_dict
+        "generation_config": generation_config_dict,
     }
     request_payload_filename = f"{prompt_filename_base}_b2b_capacity_check_request_payload.json"
     try:

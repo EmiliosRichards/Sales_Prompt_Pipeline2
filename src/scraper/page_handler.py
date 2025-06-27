@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional, Tuple, Any
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
@@ -11,16 +12,26 @@ logger = logging.getLogger(__name__)
 async def fetch_page_content(page: Page, url: str, input_row_id: Any, company_name_or_id: str) -> Tuple[Optional[str], Optional[int]]:
     logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Navigating to URL: {url}")
     try:
-        response = await page.goto(url, timeout=config_instance.default_navigation_timeout, wait_until='commit')
+        start_time = time.time()
+        response = await page.goto(url, timeout=config_instance.default_navigation_timeout * 2, wait_until='networkidle')
+        navigation_time = time.time() - start_time
+        logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Navigation took {navigation_time:.2f} seconds.")
+
         if response:
             logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Navigation to {url} successful. Status: {response.status}")
             if response.ok:
                 # After a successful navigation, handle interactions like cookie banners
                 interaction_handler = InteractionHandler(page, config_instance)
+                start_interaction_time = time.time()
                 await interaction_handler.handle_interactions()
+                interaction_time = time.time() - start_interaction_time
+                logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Interaction handling took {interaction_time:.2f} seconds.")
 
                 # The waiting logic has been removed to maximize speed.
+                start_content_time = time.time()
                 content = await page.content()
+                content_time = time.time() - start_content_time
+                logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Content fetching took {content_time:.2f} seconds.")
                 logger.debug(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Content fetched successfully for {url}.")
                 return content, response.status
             else:

@@ -228,10 +228,10 @@ def extract_numbers_with_snippets_from_text(
             snippet = _get_snippet(text_content, match.start, match.end, half_window)
             
             results.append({
-                "number": e164_number,
+                "candidate_number": e164_number,
                 "snippet": snippet,
                 "source_url": source_url,
-                "original_input_company_name": original_input_company_name # Added
+                "original_input_company_name": original_input_company_name
             })
             logger.debug(f"Extracted for {source_url} (Orig Comp: {original_input_company_name}): {e164_number}, Snippet around chars {match.start}-{match.end}")
 

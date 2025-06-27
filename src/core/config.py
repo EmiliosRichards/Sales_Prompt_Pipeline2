@@ -126,6 +126,9 @@ class AppConfig:
  
         page_type_keywords_about (List[str]): Keywords for 'about' pages.
         page_type_keywords_product_service (List[str]): Keywords for 'product/service' pages.
+        enable_slack_notifications (bool): Enable/disable Slack notifications.
+        slack_bot_token (Optional[str]): Slack Bot User OAuth Token.
+        slack_channel_id (Optional[str]): Slack channel ID for notifications.
  
     Methods:
         __init__(): Initializes AppConfig by loading values from environment
@@ -172,8 +175,9 @@ class AppConfig:
         "final_80k": {
             "Company": "CompanyName",
             "Website": "GivenURL",
-            "Combined_Description": "Description",
-            "Industry_Category_Standardized": "Industry"
+            "Combined_Description": "Combined_Description",
+            "Industry_Category_Standardized": "Industry",
+            "Company Phone": "PhoneNumber"
         },
         "german_standard": {
             "firma": "CompanyName",
@@ -341,14 +345,15 @@ class AppConfig:
                 # Strip the redundant prefix
                 raw_path = raw_path[len(project_root_name) + 1:]
             
-            return os.path.join(project_root, raw_path)
+            # Normalize the path to be safe for the current OS
+            return os.path.normpath(os.path.join(project_root, raw_path))
 
         self.prompt_path_summarization: str = get_clean_path('PROMPT_PATH_SUMMARIZATION', 'prompts/summarization_prompt.txt')
         self.extraction_profile: str = os.getenv('EXTRACTION_PROFILE', "minimal")
         self.prompt_path_homepage_context: str = get_clean_path('PROMPT_PATH_HOMEPAGE_CONTEXT', 'prompts/homepage_context_prompt.txt')
         self.PROMPT_PATH_WEBSITE_SUMMARIZER: str = get_clean_path('PROMPT_PATH_WEBSITE_SUMMARIZER', 'prompts/website_summarizer_prompt.txt')
         self.PROMPT_PATH_ATTRIBUTE_EXTRACTOR: str = get_clean_path('PROMPT_PATH_ATTRIBUTE_EXTRACTOR', 'prompts/attribute_extractor_prompt.txt')
-        self.prompt_path_minimal_classification: str = get_clean_path('PROMPT_PATH_MINIMAL_CLASSIFICATION', 'prompts/gemini_phone_validation_v1.txt')
+        self.prompt_path_minimal_classification: str = get_clean_path('PROMPT_PATH_MINIMAL_CLASSIFICATION', 'prompts/b2b_capacity_check_prompt.txt')
         self.prompt_path_enriched_extraction: str = get_clean_path('PROMPT_PATH_ENRICHED_EXTRACTION', 'prompts/profile_2.txt')
         self.LLM_MAX_INPUT_CHARS_FOR_SUMMARY: int = int(os.getenv('LLM_MAX_INPUT_CHARS_FOR_SUMMARY', '40000'))
         
@@ -380,7 +385,7 @@ class AppConfig:
         self.output_excel_file_name_template: str = os.getenv('OUTPUT_EXCEL_FILE_NAME_TEMPLATE', 'Pipeline_Summary_Report_{run_id}.xlsx')
         self.tertiary_report_file_name_template: str = os.getenv('TERTIARY_REPORT_FILE_NAME_TEMPLATE', 'Final Contacts.xlsx')
         self.processed_contacts_report_file_name_template: str = os.getenv('PROCESSED_CONTACTS_REPORT_FILE_NAME_TEMPLATE', 'Final_Processed_Contacts.xlsx')
-        self.PATH_TO_GOLDEN_PARTNERS_DATA: str = get_clean_path('PATH_TO_GOLDEN_PARTNERS_DATA', 'data/kgs_001_ER47_20250617.xlsx')
+        self.PATH_TO_GOLDEN_PARTNERS_DATA: str = get_clean_path('PATH_TO_GOLDEN_PARTNERS_DATA', 'data/kgs_001_ER47_20250626.xlsx')
 
         # --- Row Processing Range Configuration ---
         self.skip_rows_config: Optional[int] = None
@@ -435,6 +440,11 @@ class AppConfig:
         # --- Logging Configuration ---
         self.log_level: str = os.getenv('LOG_LEVEL', 'INFO').upper()
         self.console_log_level: str = os.getenv('CONSOLE_LOG_LEVEL', 'WARNING').upper()
+
+        # --- Slack Configuration ---
+        self.enable_slack_notifications: bool = os.getenv('ENABLE_SLACK_NOTIFICATIONS', 'False').lower() == 'true'
+        self.slack_bot_token: Optional[str] = os.getenv('SLACK_BOT_TOKEN')
+        self.slack_channel_id: Optional[str] = os.getenv('SLACK_CHANNEL_ID')
 
         # --- Page Type Classification Keywords ---
         page_type_about_str: str = os.getenv('PAGE_TYPE_KEYWORDS_ABOUT', 'about,about-us,company,profile,mission,vision,team,unternehmen,profil,ueber-uns,uber-uns')

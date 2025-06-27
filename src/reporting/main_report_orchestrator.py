@@ -29,6 +29,7 @@ from .report_generator import (
     write_canonical_domain_summary_report,
 )
 from .csv_reporter import write_sales_outreach_report
+from .slack_notifier import send_slack_notification
 
 logger = logging.getLogger(__name__)
 
@@ -89,15 +90,26 @@ def generate_all_reports(
 
     # Generate Sales Outreach Report
     if all_golden_partner_match_outputs:
-        sales_outreach_report_path = write_sales_outreach_report(
+        sales_outreach_report_path_csv = write_sales_outreach_report(
             output_data=all_golden_partner_match_outputs,
             output_dir=run_output_dir,
             run_id=run_id,
-            original_df=df
+            original_df=df,
+            output_format='csv'
         )
-        if sales_outreach_report_path:
-            logger.info(f"Sales outreach report generated at: {sales_outreach_report_path}")
+        sales_outreach_report_path_excel = write_sales_outreach_report(
+            output_data=all_golden_partner_match_outputs,
+            output_dir=run_output_dir,
+            run_id=run_id,
+            original_df=df,
+            output_format='excel'
+        )
+        if sales_outreach_report_path_csv:
+            logger.info(f"Sales outreach report generated at: {sales_outreach_report_path_csv}")
             run_metrics["report_generation_stats"]["sales_outreach_report_rows"] = len(all_golden_partner_match_outputs)
+            send_slack_notification(app_config, sales_outreach_report_path_csv, "Sales Outreach Report (CSV)")
+        if sales_outreach_report_path_excel:
+            send_slack_notification(app_config, sales_outreach_report_path_excel, "Sales Outreach Report (Excel)")
         else:
             logger.error("Failed to generate sales outreach report.")
             run_metrics["report_generation_stats"]["sales_outreach_report_rows"] = 0
@@ -110,16 +122,10 @@ def generate_all_reports(
     # --- Currently Active Reports ---
 
     # 4. Canonical Domain Summary Report
-    if canonical_domain_journey_data:
-        canonical_domain_summary_rows_written = write_canonical_domain_summary_report(run_id, canonical_domain_journey_data, run_output_dir, logger)
-        run_metrics["report_generation_stats"]["canonical_domain_summary_rows"] = canonical_domain_summary_rows_written
-    else:
-        logger.info("No canonical_domain_journey_data for summary report.")
-        run_metrics["report_generation_stats"]["canonical_domain_summary_rows"] = 0
 
     # 5. Row Attrition Report (Still relevant for tracking failures)
     if attrition_data_list:
-        num_attrition_rows = write_row_attrition_report(run_id, attrition_data_list, run_output_dir, canonical_domain_journey_data, input_to_canonical_map, logger)
+        num_attrition_rows = write_row_attrition_report(run_id, attrition_data_list, run_output_dir, canonical_domain_journey_data, input_to_canonical_map, logger, app_config)
         run_metrics["data_processing_stats"]["rows_in_attrition_report"] = num_attrition_rows
     else:
         logger.info("No attrition_data_list for report.")

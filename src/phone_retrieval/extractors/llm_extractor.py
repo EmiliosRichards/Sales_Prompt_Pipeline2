@@ -43,13 +43,8 @@ class GeminiLLMExtractor:
         self.gemini_client = GeminiClient(config)
         
         # Use prompt_path_minimal_classification for phone number extraction prompt
-        if not hasattr(config, 'prompt_path_minimal_classification') or not config.prompt_path_minimal_classification:
-            logger.error("AppConfig.prompt_path_minimal_classification is not set. LLMChunkProcessor cannot be properly initialized for phone extraction.")
-            # Decide on error handling: raise error, or proceed with a non-functional chunk_processor for phones
-            raise ValueError("Missing 'prompt_path_minimal_classification' in AppConfig, required for phone number extraction.")
-        else:
-            self.phone_extraction_prompt_path = config.prompt_path_minimal_classification
-            logger.info(f"Using phone extraction prompt: {self.phone_extraction_prompt_path}")
+        self.phone_extraction_prompt_path = "prompts/phone_extraction_prompt.txt"
+        logger.info(f"Using phone extraction prompt: {self.phone_extraction_prompt_path}")
 
 
         self.chunk_processor = LLMChunkProcessor(

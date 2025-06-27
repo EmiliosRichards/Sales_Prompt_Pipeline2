@@ -138,13 +138,14 @@ def execute_pipeline_flow(
     )
     company_name_col_key = active_profile.get('CompanyName', 'CompanyName')
     url_col_key = active_profile.get('GivenURL', 'GivenURL')
+    phone_col_key = active_profile.get('PhoneNumber', 'PhoneNumber')
 
     for i, (index, row_series) in enumerate(df.iterrows()):
         rows_processed_count += 1
         row: pd.Series = row_series
         company_name_str: str = str(row.get(company_name_col_key, f"MissingCompanyName_Row_{index}"))
         given_url_original: Optional[str] = row.get(url_col_key)
-        phone_number_original: Optional[str] = row.get("PhoneNumber")
+        phone_number_original: Optional[str] = row.get(phone_col_key)
         given_url_original_str: str = str(given_url_original) if given_url_original else "MissingURL"
 
         current_row_number_for_log: int = i + 1  # 1-based for logging
@@ -182,7 +183,8 @@ def execute_pipeline_flow(
                     analyzed_company_attributes=DetailedCompanyAttributes(
                         input_summary_url=given_url_original_str
                     ),
-                    match_rationale_features=[f"Failed at URL Validation: {url_status}"]
+                    match_rationale_features=[f"Failed at URL Validation: {url_status}"],
+                    scrape_status=current_row_scraper_status
                 )
             )
             continue
@@ -202,7 +204,7 @@ def execute_pipeline_flow(
             # scrape_website returns:
             # (scraped_pages_details, scraper_status, final_canonical_entry_url, collected_summary_text)
             _, scraper_status, final_canonical_entry_url, collected_summary_text = asyncio.run(
-                scrape_website(processed_url, run_output_dir, company_name_str, globally_processed_urls, index)
+                scrape_website(processed_url, run_output_dir, company_name_str, globally_processed_urls, index, run_id)
             )
             run_metrics["tasks"].setdefault("scrape_website_total_duration_seconds", 0)
             run_metrics["tasks"]["scrape_website_total_duration_seconds"] += (time.time() - scrape_task_start_time)
@@ -217,64 +219,119 @@ def execute_pipeline_flow(
                 final_canonical_entry_url if final_canonical_entry_url else processed_url
             ] = scraper_status
 
-            if current_row_scraper_status != "Success":
-                logger.warning(f"{log_identifier} Scraping failed or was skipped. Status: {current_row_scraper_status}")
-                log_row_failure(
-                    failure_writer, index, company_name_str, given_url_original_str,
-                    f"Scraping_{current_row_scraper_status}",
-                    f"Scraper status: {current_row_scraper_status}", datetime.now().isoformat(),
-                    json.dumps({
-                        "pathful_canonical_url": final_canonical_entry_url,
-                        "true_base_domain": true_base_domain_for_row
-                    }),
-                    associated_pathful_canonical_url=final_canonical_entry_url
-                )
-                row_level_failure_counts[f"Scraping_{current_row_scraper_status}"] += 1
-                rows_failed_count += 1
-                all_golden_partner_match_outputs.append(
-                    GoldenPartnerMatchOutput(
-                        analyzed_company_url=given_url_original_str,
-                        analyzed_company_attributes=DetailedCompanyAttributes(
-                            input_summary_url=given_url_original_str
-                        ),
-                        match_rationale_features=[f"Failed at Scraping: {current_row_scraper_status}"]
-                    )
-                )
-                continue
+            scraped_text_to_use = collected_summary_text
 
-            if not collected_summary_text or not collected_summary_text.strip():
-                logger.warning(f"{log_identifier} No text collected from scraped pages. Skipping LLM calls.")
-                log_row_failure(
-                    failure_writer, index, company_name_str, given_url_original_str,
-                    "LLM_Input_NoScrapedText", "No text content available after scraping.",
-                    datetime.now().isoformat(),
-                    json.dumps({"pathful_canonical_url": final_canonical_entry_url})
-                )
-                row_level_failure_counts["LLM_Input_NoScrapedText"] += 1
-                rows_failed_count += 1
-                all_golden_partner_match_outputs.append(
-                    GoldenPartnerMatchOutput(
-                        analyzed_company_url=given_url_original_str,
-                        analyzed_company_attributes=DetailedCompanyAttributes(
-                            input_summary_url=given_url_original_str
-                        ),
-                        match_rationale_features=["No text collected from website scraping"]
+            # If scraping yielded no text for any reason, try the fallback description.
+            if not scraped_text_to_use or not scraped_text_to_use.strip():
+                logger.warning(f"{log_identifier} No text available from scraping (Status: {current_row_scraper_status}). Attempting to use fallback description.")
+                fallback_text = df.at[index, "Combined_Description"]
+                if fallback_text and fallback_text.strip():
+                    scraped_text_to_use = fallback_text
+                    current_row_scraper_status = 'Used_Fallback_Description'
+                    df.at[index, 'ScrapingStatus'] = current_row_scraper_status
+                    logger.info(f"{log_identifier} Successfully used fallback description.")
+                else:
+                    # If there's no scraped text AND no fallback, then we must skip.
+                    logger.warning(f"{log_identifier} No fallback description available. Skipping LLM calls.")
+                    log_row_failure(
+                        failure_writer, index, company_name_str, given_url_original_str,
+                        f"LLM_Input_NoTextAvailable",
+                        f"Scraper status was '{current_row_scraper_status}', and no text was collected or available as a fallback.",
+                        datetime.now().isoformat(),
+                        json.dumps({
+                            "pathful_canonical_url": final_canonical_entry_url,
+                            "true_base_domain": true_base_domain_for_row
+                        }),
+                        associated_pathful_canonical_url=final_canonical_entry_url
                     )
-                )
-                continue
+                    row_level_failure_counts["LLM_Input_NoTextAvailable"] += 1
+                    rows_failed_count += 1
+                    all_golden_partner_match_outputs.append(
+                        GoldenPartnerMatchOutput(
+                            analyzed_company_url=given_url_original_str,
+                            analyzed_company_attributes=DetailedCompanyAttributes(
+                                input_summary_url=given_url_original_str
+                            ),
+                            match_rationale_features=["No text collected from website scraping and no fallback"],
+                            scrape_status=current_row_scraper_status
+                        )
+                    )
+                    continue
             
-            logger.info(f"{log_identifier} Collected {len(collected_summary_text)} characters for LLM processing.")
+            logger.info(f"{log_identifier} Collected {len(scraped_text_to_use)} characters for LLM processing.")
 
-            # --- 3. LLM Call 1: Generate Website Summary ---
+            # --- 3a. LLM Call 1a: B2B and Capacity Check ---
             llm_file_prefix_row = sanitize_filename_component(
                 f"Row{index}_{company_name_str[:20]}_{str(time.time())[-5:]}", max_len=50
             )
+            b2b_capacity_tuple = check_b2b_and_capacity(
+                gemini_client=gemini_client,
+                config=app_config,
+                company_text=scraped_text_to_use, # Use full text for this check
+                llm_context_dir=llm_context_dir,
+                llm_requests_dir=llm_requests_dir,
+                file_identifier_prefix=llm_file_prefix_row,
+                triggering_input_row_id=index,
+                triggering_company_name=company_name_str
+            )
+            b2b_analysis_obj = b2b_capacity_tuple[0]
+            if b2b_capacity_tuple[2]: # token_stats
+                run_metrics["llm_processing_stats"]["total_llm_prompt_tokens"] += b2b_capacity_tuple[2].get("prompt_tokens", 0)
+                run_metrics["llm_processing_stats"]["total_llm_completion_tokens"] += b2b_capacity_tuple[2].get("completion_tokens", 0)
+                run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += b2b_capacity_tuple[2].get("total_tokens", 0)
+                run_metrics["llm_processing_stats"]["llm_calls_b2b_capacity_check"] = run_metrics["llm_processing_stats"].get("llm_calls_b2b_capacity_check", 0) + 1
 
+            if not b2b_analysis_obj or b2b_analysis_obj.is_b2b != "Yes" or b2b_analysis_obj.serves_1000_customers == "No":
+                failure_reason = "B2B_Capacity_Check_Failed"
+                if b2b_analysis_obj:
+                    df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
+                    df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
+                    df.at[index, 'is_b2b_reason'] = b2b_analysis_obj.is_b2b_reason
+                    df.at[index, 'serves_1000_reason'] = b2b_analysis_obj.serves_1000_customers_reason
+                    if b2b_analysis_obj.is_b2b != "Yes":
+                        failure_reason = "Not_B2B"
+                    elif b2b_analysis_obj.serves_1000_customers == "No":
+                        failure_reason = "Capacity_Under_1000"
+
+                logger.warning(f"{log_identifier} Company failed B2B/capacity check. Reason: {failure_reason}")
+                log_row_failure(
+                    failure_writer, index, company_name_str, given_url_original_str,
+                    f"PreQual_{failure_reason}", "Company did not pass pre-qualification checks.",
+                    datetime.now().isoformat(),
+                    json.dumps({"raw_response": b2b_capacity_tuple[1] or "N/A"})
+                )
+                row_level_failure_counts[f"PreQual_{failure_reason}"] += 1
+                rows_failed_count += 1
+                all_golden_partner_match_outputs.append(
+                    GoldenPartnerMatchOutput(
+                        analyzed_company_url=given_url_original_str,
+                        analyzed_company_attributes=DetailedCompanyAttributes(
+                            input_summary_url=given_url_original_str
+                        ),
+                        match_rationale_features=[f"Pre-qualification failed: {failure_reason}"],
+                        scrape_status=current_row_scraper_status
+                    )
+                )
+                # If the B2B check fails for a row that used a fallback, we should not proceed.
+                # The status is already set to Used_Fallback_Description and should be preserved.
+                if df.at[index, 'ScrapingStatus'] == 'Used_Fallback_Description':
+                    continue
+                else:
+                    # For other failures, we log and continue as before
+                    continue
+            
+            df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
+            df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
+            df.at[index, 'is_b2b_reason'] = b2b_analysis_obj.is_b2b_reason
+            df.at[index, 'serves_1000_reason'] = b2b_analysis_obj.serves_1000_customers_reason
+            logger.info(f"{log_identifier} Company passed B2B/capacity check.")
+
+            # --- 3. LLM Call 1: Generate Website Summary ---
             summary_obj_tuple = generate_website_summary(
                 gemini_client=gemini_client,
                 config=app_config,
                 original_url=given_url_original_str,
-                scraped_text=collected_summary_text,
+                scraped_text=scraped_text_to_use,
                 llm_context_dir=llm_context_dir,
                 llm_requests_dir=llm_requests_dir,
                 file_identifier_prefix=llm_file_prefix_row,
@@ -308,63 +365,12 @@ def execute_pipeline_flow(
                         analyzed_company_attributes=DetailedCompanyAttributes(
                             input_summary_url=given_url_original_str
                         ),
-                        match_rationale_features=["LLM Summarization Failed"]
+                        match_rationale_features=["LLM Summarization Failed"],
+                        scrape_status=current_row_scraper_status
                     )
                 )
                 continue
             logger.info(f"{log_identifier} LLM Call 1 (Summarization) successful.")
-
-            # --- 3a. LLM Call 1a: B2B and Capacity Check ---
-            b2b_capacity_tuple = check_b2b_and_capacity(
-                gemini_client=gemini_client,
-                config=app_config,
-                website_summary=website_summary_obj.summary,
-                llm_context_dir=llm_context_dir,
-                llm_requests_dir=llm_requests_dir,
-                file_identifier_prefix=llm_file_prefix_row,
-                triggering_input_row_id=index,
-                triggering_company_name=company_name_str
-            )
-            b2b_analysis_obj = b2b_capacity_tuple[0]
-            if b2b_capacity_tuple[2]: # token_stats
-                run_metrics["llm_processing_stats"]["total_llm_prompt_tokens"] += b2b_capacity_tuple[2].get("prompt_tokens", 0)
-                run_metrics["llm_processing_stats"]["total_llm_completion_tokens"] += b2b_capacity_tuple[2].get("completion_tokens", 0)
-                run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += b2b_capacity_tuple[2].get("total_tokens", 0)
-                run_metrics["llm_processing_stats"]["llm_calls_b2b_capacity_check"] = run_metrics["llm_processing_stats"].get("llm_calls_b2b_capacity_check", 0) + 1
-
-            if not b2b_analysis_obj or b2b_analysis_obj.is_b2b != "Yes" or b2b_analysis_obj.serves_1000_customers != "Yes":
-                failure_reason = "B2B_Capacity_Check_Failed"
-                if b2b_analysis_obj:
-                    df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
-                    df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
-                    if b2b_analysis_obj.is_b2b != "Yes":
-                        failure_reason = "Not_B2B"
-                    elif b2b_analysis_obj.serves_1000_customers != "Yes":
-                        failure_reason = "Capacity_Under_1000"
-
-                logger.warning(f"{log_identifier} Company failed B2B/capacity check. Reason: {failure_reason}")
-                log_row_failure(
-                    failure_writer, index, company_name_str, given_url_original_str,
-                    f"PreQual_{failure_reason}", "Company did not pass pre-qualification checks.",
-                    datetime.now().isoformat(),
-                    json.dumps({"raw_response": b2b_capacity_tuple[1] or "N/A"})
-                )
-                row_level_failure_counts[f"PreQual_{failure_reason}"] += 1
-                rows_failed_count += 1
-                all_golden_partner_match_outputs.append(
-                    GoldenPartnerMatchOutput(
-                        analyzed_company_url=given_url_original_str,
-                        analyzed_company_attributes=DetailedCompanyAttributes(
-                            input_summary_url=given_url_original_str
-                        ),
-                        match_rationale_features=[f"Pre-qualification failed: {failure_reason}"]
-                    )
-                )
-                continue
-            
-            df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
-            df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
-            logger.info(f"{log_identifier} Company passed B2B/capacity check.")
 
             # --- 4. LLM Call 2: Extract Detailed Attributes ---
             attributes_obj_tuple = extract_detailed_attributes(
@@ -405,34 +411,40 @@ def execute_pipeline_flow(
                             input_summary_url=website_summary_obj.original_url
                             if website_summary_obj else given_url_original_str
                         ),
-                        match_rationale_features=["LLM Attribute Extraction Failed"]
+                        match_rationale_features=["LLM Attribute Extraction Failed"],
+                        scrape_status=current_row_scraper_status
                     )
                 )
                 continue
             logger.info(f"{log_identifier} LLM Call 2 (Attribute Extraction) successful.")
 
+            phone_status = "Not_Processed"
             if not phone_number_original:
                 logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
-                retrieved_numbers = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
+                retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
                 if retrieved_numbers:
-                    # Logic to select the best number
                     primary_numbers = [n for n in retrieved_numbers if n.classification == 'Primary']
+                    secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']
+                    
                     if primary_numbers:
                         best_number = primary_numbers[0].number
+                        phone_status = "Found_Primary"
+                    elif secondary_numbers:
+                        best_number = secondary_numbers[0].number
+                        phone_status = "Found_Secondary"
                     else:
-                        secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']
-                        if secondary_numbers:
-                            best_number = secondary_numbers[0].number
-                        else:
-                            best_number = None
+                        best_number = None
+                        phone_status = "No_Main_Line_Found"
                     
                     if best_number:
                         df.at[index, 'found_number'] = best_number
-                        logger.info(f"{log_identifier} Found best number: {best_number}")
-                    else:
-                        logger.warning(f"{log_identifier} No primary or secondary number found.")
+                        logger.info(f"{log_identifier} Found best number: {best_number} (Status: {phone_status})")
                 else:
-                    logger.warning(f"{log_identifier} Phone number retrieval failed.")
+                    logger.warning(f"{log_identifier} Phone number retrieval failed with status: {phone_status}")
+            else:
+                phone_status = "Provided_In_Input"
+                logger.info(f"{log_identifier} Phone number retrieval skipped as a value already exists: '{phone_number_original}'")
+            df.at[index, 'PhoneNumber_Status'] = phone_status
 
             # --- 5. LLM Call 3: Match Partner ---
             partner_match_tuple = match_partner(
@@ -466,7 +478,8 @@ def execute_pipeline_flow(
                     GoldenPartnerMatchOutput(
                         analyzed_company_url=detailed_attributes_obj.input_summary_url,
                         analyzed_company_attributes=detailed_attributes_obj,
-                        match_rationale_features=["LLM Partner Matching Failed or No Match Found"]
+                        match_rationale_features=["LLM Partner Matching Failed or No Match Found"],
+                        scrape_status=current_row_scraper_status
                     )
                 )
                 continue
@@ -514,11 +527,14 @@ def execute_pipeline_flow(
                     GoldenPartnerMatchOutput(
                         analyzed_company_url=detailed_attributes_obj.input_summary_url,
                         analyzed_company_attributes=detailed_attributes_obj,
-                        match_rationale_features=["LLM Sales Pitch Generation Failed"]
+                        match_rationale_features=["LLM Sales Pitch Generation Failed"],
+                        scrape_status=current_row_scraper_status
                     )
                 )
             else:
                 logger.info(f"{log_identifier} LLM Call 4 (Sales Pitch Generation) successful.")
+                final_match_output.scrape_status = current_row_scraper_status
+                final_match_output.analyzed_company_attributes = detailed_attributes_obj
                 all_golden_partner_match_outputs.append(final_match_output)
             # --- End of LLM Flow for a row ---
 
@@ -580,7 +596,8 @@ def execute_pipeline_flow(
                     analyzed_company_attributes=DetailedCompanyAttributes(
                         input_summary_url=given_url_original_str
                     ),
-                    match_rationale_features=[f"Unhandled Exception: {str(e_row_processing)}"]
+                    match_rationale_features=[f"Unhandled Exception: {str(e_row_processing)}"],
+                    scrape_status=current_row_scraper_status
                 )
             )
 

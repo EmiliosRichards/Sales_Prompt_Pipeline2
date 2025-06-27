@@ -99,9 +99,10 @@ class LLMChunkProcessor:
 
         candidate_items_json_str_chunk = json.dumps(current_chunk_candidate_items, indent=2)
         formatted_prompt_chunk = prompt_with_context.replace(
-            "[Insert JSON list of (candidate_number, source_url, snippet) objects here]",
+            "{{PHONE_CANDIDATES_JSON_PLACEHOLDER}}",
             candidate_items_json_str_chunk
         )
+        logger.debug(f"Formatted prompt for chunk: {formatted_prompt_chunk}")
         return formatted_prompt_chunk
 
     def _process_llm_response_for_chunk(
@@ -123,6 +124,8 @@ class LLMChunkProcessor:
                 if final_processed_outputs_for_chunk[k_err] is None: # Only fill if not already processed (e.g. by retry)
                     final_processed_outputs_for_chunk[k_err] = create_error_llm_item(item_detail_chunk_err, "Error_ChunkEmptyResponse", file_identifier_prefix=chunk_file_identifier_prefix, triggering_input_row_id=triggering_input_row_id, triggering_company_name=triggering_company_name)
             return
+
+        logger.debug(f"Raw LLM response for chunk: {llm_response_text}")
 
         # The new SDK might provide parsed Pydantic objects directly if response_schema is used effectively.
         # For now, assuming we might still need to parse from text as a fallback or primary method.
@@ -146,6 +149,7 @@ class LLMChunkProcessor:
             # Gemini client with response_schema should ideally return a parsed object or allow easy parsing
             # For now, we parse the extracted JSON string.
             parsed_json_object_chunk = json.loads(json_candidate_str_chunk)
+            logger.debug(f"Parsed JSON object for chunk: {parsed_json_object_chunk}")
             llm_result_chunk = MinimalExtractionOutput(**parsed_json_object_chunk)
             validated_numbers_chunk = llm_result_chunk.extracted_numbers
 

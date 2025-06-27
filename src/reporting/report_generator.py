@@ -22,8 +22,9 @@ import json
 from typing import List, Dict, Optional, Any, Tuple, Counter as TypingCounter
 from collections import Counter
 
-# from src.core.config import AppConfig # AppConfig is not directly used.
+from src.core.config import AppConfig
 from src.utils.helpers import get_input_canonical_url
+from src.reporting.slack_notifier import send_slack_notification
 
 # It's good practice to get the logger for the current module
 logger_module = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ def write_row_attrition_report(
     output_dir: str,
     canonical_domain_journey_data: Dict[str, Dict[str, Any]],
     input_to_canonical_map: Dict[str, Optional[str]],
-    logger: logging.Logger  # Keep passed logger for consistency if other modules do this
+    logger: logging.Logger,
+    config: AppConfig
 ) -> int:
     """
     Writes the collected row attrition data to an Excel file.
@@ -152,6 +154,7 @@ def write_row_attrition_report(
                 worksheet.column_dimensions[get_column_letter(col_idx + 1)].width = adjusted_width
         
         logger.info(f"Row attrition report successfully saved to {report_path}")
+        send_slack_notification(config, report_path, "Row Attrition Report")
         return len(report_df)
     except Exception as e:
         logger.error(f"Failed to write row attrition report to {report_path}: {e}", exc_info=True)
@@ -162,7 +165,8 @@ def write_canonical_domain_summary_report(
     run_id: str,
     domain_journey_data: Dict[str, Dict[str, Any]],
     output_dir: str,
-    logger: logging.Logger # Keep passed logger
+    logger: logging.Logger,
+    config: AppConfig
 ) -> int:
     """
     Writes the canonical domain journey data to an Excel file.
@@ -257,6 +261,7 @@ def write_canonical_domain_summary_report(
                 worksheet.column_dimensions[get_column_letter(col_idx + 1)].width = adjusted_width
         
         logger.info(f"Canonical domain summary report successfully saved to {report_path}")
+        send_slack_notification(config, report_path, "Canonical Domain Summary Report")
         return len(report_df)
     except Exception as e:
         logger.error(f"Failed to write canonical domain summary report to {report_path}: {e}", exc_info=True)
