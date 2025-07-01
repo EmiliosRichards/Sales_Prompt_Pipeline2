@@ -171,7 +171,6 @@ def generate_sales_pitch(
             if json_string_from_text:
                 parsed_json_object = json.loads(json_string_from_text)
                 parsed_json_object['analyzed_company_url'] = target_attributes.input_summary_url
-                parsed_json_object['analyzed_company_attributes'] = target_attributes.model_dump()
                 if website_summary_obj and website_summary_obj.summary:
                     parsed_json_object['summary'] = website_summary_obj.summary
                 parsed_json_object['matched_partner_name'] = matched_partner.get('name')

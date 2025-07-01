@@ -20,6 +20,7 @@ call statistics.
 import pandas as pd
 import asyncio
 import json
+import os
 import time
 from datetime import datetime
 import logging
@@ -41,6 +42,7 @@ from src.extractors.llm_tasks.b2b_capacity_check_task import check_b2b_and_capac
 from src.utils.helpers import log_row_failure, sanitize_filename_component
 from src.processing.url_processor import process_input_url
 from src.phone_retrieval.retrieval_wrapper import retrieve_phone_numbers_for_url
+from src.reporting.live_csv_reporter import LiveCsvReporter
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,21 @@ def execute_pipeline_flow(
     pipeline_loop_start_time = time.time()
     rows_processed_count = 0
     rows_failed_count = 0
+
+    # --- Live Reporter Setup ---
+    # Define the header for the live report. This should contain all possible columns.
+    live_report_header = list(df.columns) + [
+        'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status', 'is_b2b', 'serves_1000',
+        'is_b2b_reason', 'serves_1000_reason', 'description', 'Industry',
+        'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
+        'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
+        'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
+        'Target Group Size Assessment', 'sales_pitch', 'matched_golden_partner',
+        'match_reasoning', 'Matched Partner Description', 'Avg Leads Per Day', 'Rank'
+    ]
+    live_report_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.csv")
+    live_reporter = LiveCsvReporter(filepath=live_report_path, header=live_report_header)
+    # --- End Live Reporter Setup ---
 
     # Pre-fetch company name and URL column names from AppConfig
     active_profile = app_config.INPUT_COLUMN_PROFILES.get(
@@ -567,6 +584,41 @@ def execute_pipeline_flow(
                 journey_entry["LLM_Stages_Succeeded"] = max(
                     journey_entry.get("LLM_Stages_Succeeded", 0), current_succeeded_stages
                 )
+
+            # --- Live Reporting ---
+            # After all processing for a row is complete (or has failed),
+            # gather all data and write to the live report.
+            final_row_data = row.to_dict()
+            # Update with data gathered during the pipeline flow
+            final_row_data.update({
+                'CanonicalEntryURL': true_base_domain_for_row,
+                'PhoneNumber_Status': df.at[index, 'PhoneNumber_Status'],
+                'found_number': df.at[index, 'found_number'] if 'found_number' in df.columns else None,
+                'is_b2b': b2b_analysis_obj.is_b2b if b2b_analysis_obj else None,
+                'serves_1000': b2b_analysis_obj.serves_1000_customers if b2b_analysis_obj else None,
+                'is_b2b_reason': b2b_analysis_obj.is_b2b_reason if b2b_analysis_obj else None,
+                'serves_1000_reason': b2b_analysis_obj.serves_1000_customers_reason if b2b_analysis_obj else None,
+                'description': website_summary_obj.summary if website_summary_obj else None,
+                'Industry': detailed_attributes_obj.industry if detailed_attributes_obj else None,
+                'Products/Services Offered': "; ".join(detailed_attributes_obj.products_services_offered) if detailed_attributes_obj and detailed_attributes_obj.products_services_offered else None,
+                'USP/Key Selling Points': "; ".join(detailed_attributes_obj.usp_key_selling_points) if detailed_attributes_obj and detailed_attributes_obj.usp_key_selling_points else None,
+                'Customer Target Segments': "; ".join(detailed_attributes_obj.customer_target_segments) if detailed_attributes_obj and detailed_attributes_obj.customer_target_segments else None,
+                'Business Model': detailed_attributes_obj.business_model if detailed_attributes_obj else None,
+                'Company Size Inferred': detailed_attributes_obj.company_size_category_inferred if detailed_attributes_obj else None,
+                'Innovation Level Indicators': detailed_attributes_obj.innovation_level_indicators_text if detailed_attributes_obj else None,
+                'Website Clarity Notes': detailed_attributes_obj.website_clarity_notes if detailed_attributes_obj else None,
+                'B2B Indicator': detailed_attributes_obj.b2b_indicator if detailed_attributes_obj else None,
+                'Phone Outreach Suitability': detailed_attributes_obj.phone_outreach_suitability if detailed_attributes_obj else None,
+                'Target Group Size Assessment': detailed_attributes_obj.target_group_size_assessment if detailed_attributes_obj else None,
+                'sales_pitch': final_match_output.phone_sales_line if final_match_output else None,
+                'matched_golden_partner': final_match_output.matched_partner_name if final_match_output else None,
+                'match_reasoning': "; ".join(final_match_output.match_rationale_features) if final_match_output and final_match_output.match_rationale_features else None,
+                'Matched Partner Description': final_match_output.matched_partner_description if final_match_output else None,
+                'Avg Leads Per Day': final_match_output.avg_leads_per_day if final_match_output else None,
+                'Rank': final_match_output.rank if final_match_output else None
+            })
+            live_reporter.append_row(final_row_data)
+            # --- End Live Reporting ---
 
             logger.info(f"{log_identifier} Row {current_row_number_for_log} processing complete.")
 

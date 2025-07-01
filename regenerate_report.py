@@ -3,209 +3,158 @@ import os
 import pandas as pd
 import json
 import logging
-import re # For parsing filenames
-from typing import List, Dict, Optional, Any
+import re
+from typing import Dict, Any, Optional
+from collections import defaultdict
 
-from src.core.config import AppConfig
-from src.core.schemas import GoldenPartnerMatchOutput, DetailedCompanyAttributes, B2BAnalysisOutput, WebsiteTextSummary
-from src.data_handling.loader import load_and_preprocess_data
-from src.core.logging_config import setup_logging
-from src.utils.helpers import resolve_path # To resolve input file path
-
-# Set up basic logging
-setup_logging()
+# --- Basic Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
+def extract_json_from_text(text_output: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Extracts a JSON object from a larger text block."""
+    if not text_output:
+        return None
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text_output, re.DOTALL)
+    json_str = match.group(1) if match else text_output
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.debug(f"Failed to decode JSON string: {json_str[:200]}...")
+        return None
 
-def get_row_index_from_filename(filename: str) -> Optional[int]:
-    """Parses the row index from an LLM context filename."""
-    match = re.search(r"Row(\d+)_", filename)
-    if match:
-        return int(match.group(1))
-    return None
-
-
-def regenerate_report(run_id: str, app_config: AppConfig):
+def process_artifacts(llm_context_dir: str) -> Dict[int, Dict[str, Any]]:
     """
-    Main function to regenerate the sales outreach report from a given run's artifacts.
+    Scans all artifacts, parses them, and aggregates required data by row index.
+    A row is considered complete if its artifacts contain both a 'phone_sales_line'
+    and a 'matched_partner_name'.
     """
-    logger.info(f"Starting report regeneration for run_id: {run_id}")
+    artifact_data = defaultdict(dict)
+    abs_path = os.path.abspath(llm_context_dir)
+    logger.info(f"Scanning and processing all artifacts in: {abs_path}")
 
-    # --- 1. Initialization and Path Setup ---
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
-    output_base_dir_abs = os.path.join(project_root, app_config.output_base_dir)
-    run_output_dir = os.path.join(output_base_dir_abs, run_id)
-    llm_context_dir = os.path.join(run_output_dir, app_config.llm_context_subdir)
-    failed_rows_path = os.path.join(run_output_dir, f"failed_rows_{run_id}.csv")
+    if not os.path.isdir(abs_path):
+        logger.warning(f"LLM context directory not found: {abs_path}")
+        return {}
 
-    if not os.path.isdir(run_output_dir):
-        logger.error(f"Run output directory not found: {run_output_dir}")
-        return
-
-    # --- 2. Load Initial Data & Apply Slice ---
-    input_file_path_abs = resolve_path(app_config.input_excel_file_path, __file__)
-    logger.info(f"Loading original input data from: {input_file_path_abs}")
-    original_df = load_and_preprocess_data(input_file_path_abs, app_config)
-    if original_df is None:
-        logger.error(f"Failed to load original input data from {input_file_path_abs}. Exiting.")
-        return
-    original_df.reset_index(inplace=True)
-    original_df.rename(columns={'index': 'original_index'}, inplace=True)
-
-    start_row = app_config.skip_rows_config or 0
-    num_rows = app_config.nrows_config
-    end_row = (start_row + num_rows) if num_rows is not None else len(original_df)
-    processed_df_slice = original_df.iloc[start_row:end_row].copy()
-    logger.info(f"Processing slice of original data: rows {start_row} to {end_row-1}")
-
-    if processed_df_slice.empty:
-        logger.warning("The specified processing slice resulted in an empty DataFrame.")
-        return
-
-    # --- 3. Load Run Artifacts ---
-    failure_map: Dict[int, Dict[str, Any]] = {}
-    if os.path.exists(failed_rows_path):
-        failures_df = pd.read_csv(failed_rows_path)
-        for _, row in failures_df.iterrows():
-            failure_map[row['input_row_identifier']] = row.to_dict()
-        logger.info(f"Loaded {len(failure_map)} failure records.")
-
-    artifact_map: Dict[int, Dict[str, str]] = {}
-    if os.path.isdir(llm_context_dir):
-        for filename in os.listdir(llm_context_dir):
-            row_index = get_row_index_from_filename(filename)
-            if row_index is not None:
-                if row_index not in artifact_map:
-                    artifact_map[row_index] = {}
-                
-                if "_1a_B2BCapacityCheck.json" in filename:
-                    artifact_map[row_index]['b2b_check'] = os.path.join(llm_context_dir, filename)
-                elif "_1_WebsiteSummary.json" in filename:
-                    artifact_map[row_index]['summary'] = os.path.join(llm_context_dir, filename)
-                elif "_2_AttributeExtraction.json" in filename:
-                    artifact_map[row_index]['attributes'] = os.path.join(llm_context_dir, filename)
-                elif "_4_SalesPitchGeneration.json" in filename:
-                    artifact_map[row_index]['sales_pitch'] = os.path.join(llm_context_dir, filename)
-        logger.info(f"Mapped LLM artifacts for {len(artifact_map)} rows.")
-
-    # --- 4. Row-by-Row Progressive Enrichment ---
-    report_data = []
-    missing_rows_data = []
-    logger.info("Starting row-by-row progressive enrichment...")
-
-    for _, row in processed_df_slice.iterrows():
-        row_index = row['original_index']
-        report_row = row.to_dict() # Start with the original data
-        artifacts = artifact_map.get(row_index)
-
-        if artifacts:
-            # Progressively enrich the row
-            if 'b2b_check' in artifacts:
-                try:
-                    with open(artifacts['b2b_check'], 'r', encoding='utf-8') as f:
-                        b2b_data = B2BAnalysisOutput.parse_obj(json.load(f))
-                        report_row['is_b2b'] = b2b_data.is_b2b
-                        report_row['is_b2b_reason'] = b2b_data.is_b2b_reason
-                        report_row['serves_1000'] = b2b_data.serves_1000_customers
-                        report_row['serves_1000_reason'] = b2b_data.serves_1000_customers_reason
-                except Exception as e:
-                    logger.warning(f"Could not parse B2B check for row {row_index}: {e}")
+    for filename in os.listdir(abs_path):
+        match = re.search(r"Row(\d+)_", filename)
+        if not match:
+            continue
+        
+        row_index = int(match.group(1))
+        
+        file_path = os.path.join(abs_path, filename)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
             
-            if 'summary' in artifacts:
-                 try:
-                    with open(artifacts['summary'], 'r', encoding='utf-8') as f:
-                        summary_data = WebsiteTextSummary.parse_obj(json.load(f))
-                        report_row['description'] = summary_data.summary
-                 except Exception as e:
-                    logger.warning(f"Could not parse Summary for row {row_index}: {e}")
+            data = extract_json_from_text(content)
+            if not data:
+                continue
 
-            if 'attributes' in artifacts:
-                try:
-                    with open(artifacts['attributes'], 'r', encoding='utf-8') as f:
-                        attrs_data = DetailedCompanyAttributes.parse_obj(json.load(f))
-                        report_row['Industry'] = attrs_data.industry or report_row.get('Industry')
-                        report_row['Products/Services Offered'] = "; ".join(attrs_data.products_services_offered) if attrs_data.products_services_offered else ''
-                        report_row['USP/Key Selling Points'] = "; ".join(attrs_data.usp_key_selling_points) if attrs_data.usp_key_selling_points else ''
-                        report_row['Customer Target Segments'] = "; ".join(attrs_data.customer_target_segments) if attrs_data.customer_target_segments else ''
-                except Exception as e:
-                    logger.warning(f"Could not parse Attributes for row {row_index}: {e}")
+            # Check for sales pitch and partner info within the content
+            if 'phone_sales_line' in data:
+                artifact_data[row_index]['sales_pitch'] = data['phone_sales_line']
+            
+            if 'matched_partner_name' in data:
+                artifact_data[row_index]['matched_golden_partner'] = data['matched_partner_name']
+                artifact_data[row_index]['match_reasoning'] = "; ".join(data.get('match_rationale_features', []))
+                artifact_data[row_index]['Matched Partner Description'] = data.get('matched_partner_description', '')
 
-            if 'sales_pitch' in artifacts:
-                try:
-                    with open(artifacts['sales_pitch'], 'r', encoding='utf-8') as f:
-                        pitch_data = GoldenPartnerMatchOutput.parse_obj(json.load(f))
-                        report_row['sales_pitch'] = pitch_data.phone_sales_line
-                        report_row['matched_golden_partner'] = pitch_data.matched_partner_name
-                        report_row['match_reasoning'] = "; ".join(pitch_data.match_rationale_features) if pitch_data.match_rationale_features else ""
-                except Exception as e:
-                    logger.warning(f"Could not parse Sales Pitch for row {row_index}: {e}")
+        except Exception as e:
+            logger.error(f"Error processing file {filename}: {e}")
+            
+    return artifact_data
 
-        # Add failure information if it exists
-        if row_index in failure_map:
-            report_row['Regeneration_Status'] = 'Failed'
-            report_row['Failure_Stage'] = failure_map[row_index].get('stage_of_failure')
-            report_row['Failure_Reason'] = failure_map[row_index].get('error_reason')
-        elif artifacts:
-            report_row['Regeneration_Status'] = 'Success'
-        else:
-            # This is a missing row
-            missing_rows_data.append({
-                'Original Row Number': row_index + 2,
-                'CompanyName': row.get('CompanyName'),
-                'GivenURL': row.get('GivenURL'),
-                'Reason': "No LLM artifacts or failure log entry found for this row."
-            })
-            continue # Don't add missing rows to the main report
+def regenerate_final_report(run_id: str, input_file: str):
+    """
+    Generates a focused sales report by enriching an input file with data
+    found inside sales pitch and partner match artifacts.
+    """
+    logger.info(f"Starting final report regeneration for run_id: {run_id}")
 
+    # --- 1. Path Setup ---
+    project_root = os.path.abspath(os.path.dirname(__file__))
+    run_output_dir = os.path.join(project_root, 'output_data', run_id)
+    llm_context_dir = os.path.join(run_output_dir, 'llm_context')
+
+    # --- 2. Process all artifacts and identify completed rows ---
+    all_artifact_data = process_artifacts(llm_context_dir)
+    
+    completed_row_indices = {
+        idx for idx, data in all_artifact_data.items()
+        if 'sales_pitch' in data and 'matched_golden_partner' in data
+    }
+    
+    logger.info(f"Found {len(completed_row_indices)} rows with both required data points (sales_pitch and matched_partner).")
+
+    if not completed_row_indices:
+        logger.warning("No completed rows found after processing artifacts. Exiting.")
+        return
+
+    # --- 3. Load and Filter Original Data ---
+    try:
+        logger.info(f"Loading original input data from: {input_file}")
+        original_df = pd.read_csv(input_file, keep_default_na=False, low_memory=False) if input_file.endswith('.csv') else pd.read_excel(input_file, keep_default_na=False)
+    except FileNotFoundError:
+        logger.error(f"Input file not found: {input_file}"); return
+    except Exception as e:
+        logger.error(f"Error loading input file: {e}"); return
+
+    original_df['original_index'] = original_df.index
+    filtered_df = original_df[original_df['original_index'].isin(completed_row_indices)].copy()
+    logger.info(f"Filtered input data to {len(filtered_df)} rows.")
+
+    if filtered_df.empty:
+        logger.warning("After filtering, no matching rows from the input file were found. Exiting."); return
+
+    # --- 4. Enrich Data from Processed Artifacts ---
+    report_data = []
+    for _, row in filtered_df.iterrows():
+        report_row = row.to_dict()
+        row_index = report_row['original_index']
+        
+        # Merge data from artifacts
+        report_row.update(all_artifact_data.get(row_index, {}))
+        
+        # Set B2B flags since these rows are complete
+        report_row['is_b2b'] = 'Yes'
+        report_row['serves_1000'] = 'Yes'
+        
         report_data.append(report_row)
 
-    logger.info(f"Enrichment complete. Processed {len(report_data)} rows for the main report.")
+    # --- 5. Generate Final Report ---
+    if not report_data:
+        logger.warning("No data was successfully enriched. No report will be generated."); return
 
-    # --- 5. Generate Reports ---
-    if report_data:
-        logger.info(f"Generating main Sales Outreach Report...")
-        final_df = pd.DataFrame(report_data)
-        
-        # Clean up by removing the original index column if it exists
-        if 'original_index' in final_df.columns:
-            final_df.drop(columns=['original_index'], inplace=True)
+    final_df = pd.DataFrame(report_data)
+    
+    # Define and order final columns
+    final_columns = [
+        'Company Name', 'URL', 'original_index', 'is_b2b', 'serves_1000',
+        'sales_pitch', 'matched_golden_partner', 'match_reasoning',
+        'Matched Partner Description'
+    ]
+    # Add original columns that are not in our final list
+    original_cols_to_add = [col for col in original_df.columns if col not in final_columns]
+    final_df = final_df.reindex(columns=original_cols_to_add + final_columns)
 
-        csv_report_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_regenerated.csv")
-        final_df.to_csv(csv_report_path, index=False, encoding='utf-8-sig')
-        logger.info(f"Successfully generated CSV report: {csv_report_path}")
-        
-        excel_report_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_regenerated.xlsx")
-        final_df.to_excel(excel_report_path, index=False)
-        logger.info(f"Successfully generated Excel report: {excel_report_path}")
-    else:
-        logger.warning("No data available to generate a final report.")
-
-    if missing_rows_data:
-        logger.warning(f"Found {len(missing_rows_data)} missing rows. Generating Reconciliation Summary.")
-        missing_df = pd.DataFrame(missing_rows_data)
-        missing_report_path = os.path.join(run_output_dir, f"Reconciliation_Summary_{run_id}.csv")
-        missing_df.to_csv(missing_report_path, index=False, encoding='utf-8-sig')
-        logger.warning(f"Reconciliation Summary for missing rows generated: {missing_report_path}")
-    else:
-        logger.info("No missing rows found. Reconciliation successful.")
-
-    logger.info(f"Report regeneration for run_id: {run_id} complete.")
+    csv_report_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_regenerated_final.csv")
+    final_df.to_csv(csv_report_path, index=False, encoding='utf-8-sig')
+    logger.info(f"Successfully generated final report: {csv_report_path}")
 
 
 def main():
-    """
-    Argument parsing and script entry point.
-    """
-    parser = argparse.ArgumentParser(description="Regenerate Sales Outreach Report from pipeline artifacts.")
-    parser.add_argument("run_id", type=str, help="The unique run_id of the pipeline execution to regenerate the report for.")
+    parser = argparse.ArgumentParser(description="Regenerate a final Sales Outreach Report from pipeline artifacts.")
+    parser.add_argument("run_id", type=str, help="The unique run_id of the pipeline execution.")
+    parser.add_argument("input_file", type=str, help="Path to the original input file (CSV or Excel).")
     args = parser.parse_args()
-
-    try:
-        app_config = AppConfig()
-        regenerate_report(args.run_id, app_config)
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during script execution: {e}", exc_info=True)
-
+    regenerate_final_report(args.run_id, args.input_file)
 
 if __name__ == "__main__":
     main()
