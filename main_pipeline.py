@@ -4,8 +4,7 @@ import csv
 import logging
 import os
 import time
-# from datetime import datetime # No longer used directly for run_id generation here
-# import re, urllib.parse, socket, asyncio # Already removed
+import argparse # Import argparse
 
 from dotenv import load_dotenv
 # from pathlib import Path # No longer used directly for augmented report path here
@@ -38,16 +37,21 @@ logger = logging.getLogger(__name__)
 # __file__ will refer to main_pipeline.py's location
 BASE_FILE_PATH_FOR_RESOLVE = __file__
 
-def main() -> None:
-    app_config: AppConfig = AppConfig() # Initialize AppConfig globally for easy access
+def main(args) -> None:
     """
     Main entry point for the phone validation pipeline.
     Orchestrates the entire process from data loading to report generation.
     """
+    # Initialize AppConfig with overrides from command-line arguments
+    app_config: AppConfig = AppConfig(
+        input_file_override=args.input_file,
+        row_range_override=args.range,
+        run_id_suffix_override=args.suffix
+    )
     pipeline_start_time = time.time()
     
     # 1. Initialize Run ID and Metrics
-    run_id = generate_run_id()
+    run_id = generate_run_id(suffix=app_config.run_id_suffix)
     run_metrics: Dict[str, Any] = initialize_run_metrics(run_id) # Use helper
 
     # 2. Setup Output Directories
@@ -262,7 +266,26 @@ def main() -> None:
     logger.info(f"All outputs for this run are in: {run_output_dir}")
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Run the sales outreach pipeline with optional configuration overrides.")
+    parser.add_argument(
+        "-i", "--input-file",
+        type=str,
+        help="Path to the input data file. Overrides the INPUT_EXCEL_FILE_PATH in the .env file."
+    )
+    parser.add_argument(
+        "-r", "--range",
+        type=str,
+        help="The range of rows to process (e.g., '1-1000', '500-', '-200'). Overrides ROW_PROCESSING_RANGE in the .env file."
+    )
+    parser.add_argument(
+        "-s", "--suffix",
+        type=str,
+        help="A custom suffix to append to the run ID for easier identification (e.g., 'batch1'). Overrides RUN_ID_SUFFIX in the .env file."
+    )
+    args = parser.parse_args()
+
     # Basic logging config if no handlers are configured yet (e.g., when run directly)
     if not logger.hasHandlers():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    main()
+    
+    main(args)

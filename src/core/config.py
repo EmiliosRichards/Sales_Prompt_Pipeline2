@@ -200,15 +200,23 @@ class AppConfig:
         }
     }
 
-    def __init__(self):
+    def __init__(self,
+                 input_file_override: Optional[str] = None,
+                 row_range_override: Optional[str] = None,
+                 run_id_suffix_override: Optional[str] = None):
         """
         Initializes the AppConfig instance.
 
-        Loads all configuration parameters from environment variables using `os.getenv()`.
-        If an environment variable is not set for a particular configuration, a
-        predefined default value is used. It also handles type conversions for
-        parameters like integers, floats, booleans, and lists from their string
-        representations in environment variables.
+        Loads configuration from environment variables, but allows for specific
+        settings to be overridden by arguments passed during instantiation.
+
+        Args:
+            input_file_override (Optional[str]): If provided, this path will be used
+                for the input file, overriding the .env setting.
+            row_range_override (Optional[str]): If provided, this range string
+                (e.g., "1-1000") will be used, overriding the .env setting.
+            run_id_suffix_override (Optional[str]): If provided, this string will be
+                appended to the run ID, overriding the .env setting.
         """
         # --- Scraper Configuration ---
         user_agents_str = os.getenv('SCRAPER_USER_AGENTS', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
@@ -380,7 +388,7 @@ class AppConfig:
         self.default_region_code: Optional[str] = os.getenv('DEFAULT_REGION_CODE', 'DE') # Default region for parsing if others fail
 
         # --- Data Handling & Input Profiling ---
-        self.input_excel_file_path: str = os.getenv('INPUT_EXCEL_FILE_PATH', 'data_to_be_inputed.xlsx')  # Relative to project root
+        self.input_excel_file_path: str = input_file_override or os.getenv('INPUT_EXCEL_FILE_PATH', 'data_to_be_inputed.xlsx')  # Relative to project root
         self.input_file_profile_name: str = os.getenv("INPUT_FILE_PROFILE_NAME", "default")
         self.output_excel_file_name_template: str = os.getenv('OUTPUT_EXCEL_FILE_NAME_TEMPLATE', 'Pipeline_Summary_Report_{run_id}.xlsx')
         self.tertiary_report_file_name_template: str = os.getenv('TERTIARY_REPORT_FILE_NAME_TEMPLATE', 'Final Contacts.xlsx')
@@ -390,7 +398,7 @@ class AppConfig:
         # --- Row Processing Range Configuration ---
         self.skip_rows_config: Optional[int] = None
         self.nrows_config: Optional[int] = None
-        raw_row_range: Optional[str] = os.getenv('ROW_PROCESSING_RANGE', "")
+        raw_row_range: Optional[str] = row_range_override or os.getenv('ROW_PROCESSING_RANGE', "")
 
         if raw_row_range:
             raw_row_range = raw_row_range.strip()
@@ -440,6 +448,9 @@ class AppConfig:
         # --- Logging Configuration ---
         self.log_level: str = os.getenv('LOG_LEVEL', 'INFO').upper()
         self.console_log_level: str = os.getenv('CONSOLE_LOG_LEVEL', 'WARNING').upper()
+
+        # --- Run Identifier ---
+        self.run_id_suffix: Optional[str] = run_id_suffix_override or os.getenv('RUN_ID_SUFFIX')
 
         # --- Slack Configuration ---
         self.enable_slack_notifications: bool = os.getenv('ENABLE_SLACK_NOTIFICATIONS', 'False').lower() == 'true'

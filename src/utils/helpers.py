@@ -223,8 +223,17 @@ def is_target_country_number_reliable(phone_number_str: str) -> bool:
         logger.debug(f"NumberParseException for '{phone_number_str}' during target country check.")
         return False
 
-def generate_run_id() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+def generate_run_id(suffix: Optional[str] = None) -> str:
+    """
+    Generates a unique run ID based on the current timestamp.
+    An optional suffix can be added for better identification.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if suffix:
+        # Sanitize suffix to ensure it's filename-friendly
+        sanitized_suffix = re.sub(r'[^a-zA-Z0-9_-]', '', suffix)
+        return f"{timestamp}_{sanitized_suffix}"
+    return timestamp
 
 def log_row_failure(
     failure_log_writer: Optional[Any], # csv.writer object
