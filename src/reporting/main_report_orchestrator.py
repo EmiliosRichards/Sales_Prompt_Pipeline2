@@ -107,9 +107,25 @@ def generate_all_reports(
         if sales_outreach_report_path_csv:
             logger.info(f"Sales outreach report generated at: {sales_outreach_report_path_csv}")
             run_metrics["report_generation_stats"]["sales_outreach_report_rows"] = len(all_golden_partner_match_outputs)
-            send_slack_notification(app_config, sales_outreach_report_path_csv, "Sales Outreach Report (CSV)")
+            send_slack_notification(
+                config=app_config,
+                file_path=sales_outreach_report_path_csv,
+                report_name="Sales Outreach Report (CSV)",
+                run_id=run_id,
+                input_file=os.path.basename(original_input_file_path),
+                rows_processed=len(all_golden_partner_match_outputs),
+                mode=app_config.input_file_profile_name
+            )
         if sales_outreach_report_path_excel:
-            send_slack_notification(app_config, sales_outreach_report_path_excel, "Sales Outreach Report (Excel)")
+            send_slack_notification(
+                config=app_config,
+                file_path=sales_outreach_report_path_excel,
+                report_name="Sales Outreach Report (Excel)",
+                run_id=run_id,
+                input_file=os.path.basename(original_input_file_path),
+                rows_processed=len(all_golden_partner_match_outputs),
+                mode=app_config.input_file_profile_name
+            )
         else:
             logger.error("Failed to generate sales outreach report.")
             run_metrics["report_generation_stats"]["sales_outreach_report_rows"] = 0

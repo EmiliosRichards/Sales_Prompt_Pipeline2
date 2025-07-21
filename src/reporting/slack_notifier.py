@@ -6,7 +6,15 @@ from src.core.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-def send_slack_notification(config: AppConfig, file_path: str, report_name: str):
+def send_slack_notification(
+    config: AppConfig,
+    file_path: str,
+    report_name: str,
+    run_id: str,
+    input_file: str,
+    rows_processed: int,
+    mode: str
+):
     """
     Sends a notification with a file to a Slack channel.
 
@@ -14,6 +22,10 @@ def send_slack_notification(config: AppConfig, file_path: str, report_name: str)
         config (AppConfig): The application configuration.
         file_path (str): The path to the file to upload.
         report_name (str): The name of the report being sent.
+        run_id (str): The ID of the pipeline run.
+        input_file (str): The name of the input file.
+        rows_processed (int): The number of rows processed.
+        mode (str): The processing mode/profile.
     """
     if not config.enable_slack_notifications:
         logger.info("Slack notifications are disabled. Skipping.")
@@ -25,12 +37,21 @@ def send_slack_notification(config: AppConfig, file_path: str, report_name: str)
 
     client = WebClient(token=config.slack_bot_token)
     
+    message = f"""Shop Confirmation System Pipeline Run Complete
+---------------------------------------------
+Mode: `{mode}`
+Input File: `{input_file}`
+Rows Processed: {rows_processed}
+Run ID: `{run_id}`
+---------------------------------------------
+Report is attached."""
+
     try:
         response = client.files_upload_v2(
             channel=config.slack_channel_id,
             file=file_path,
             title=os.path.basename(file_path),
-            initial_comment=f"Here is the {report_name} report.",
+            initial_comment=message,
         )
         logger.info(f"Successfully uploaded {report_name} to Slack.")
     except SlackApiError as e:
