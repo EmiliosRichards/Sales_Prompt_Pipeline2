@@ -436,9 +436,17 @@ def execute_pipeline_flow(
             logger.info(f"{log_identifier} LLM Call 2 (Attribute Extraction) successful.")
 
             phone_status = "Not_Processed"
-            if not phone_number_original:
-                logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
-                retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
+            should_retrieve = not phone_number_original or app_config.force_phone_extraction
+
+            if should_retrieve:
+                if app_config.force_phone_extraction and phone_number_original:
+                    logger.info(f"{log_identifier} 'force_phone_extraction' is enabled. Attempting retrieval even with existing number.")
+                else:
+                    logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
+
+                retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str, app_config)
+                
+                best_number = None
                 if retrieved_numbers:
                     primary_numbers = [n for n in retrieved_numbers if n.classification == 'Primary']
                     secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']
@@ -450,17 +458,23 @@ def execute_pipeline_flow(
                         best_number = secondary_numbers[0].number
                         phone_status = "Found_Secondary"
                     else:
-                        best_number = None
                         phone_status = "No_Main_Line_Found"
-                    
-                    if best_number:
-                        df.at[index, 'found_number'] = best_number
-                        logger.info(f"{log_identifier} Found best number: {best_number} (Status: {phone_status})")
                 else:
                     logger.warning(f"{log_identifier} Phone number retrieval failed with status: {phone_status}")
+
+                if best_number:
+                    df.at[index, 'found_number'] = best_number
+                    logger.info(f"{log_identifier} Found best number: {best_number} (Status: {phone_status})")
+                elif phone_number_original:
+                    df.at[index, 'found_number'] = phone_number_original
+                    phone_status = "Fallback_To_Input"
+                    logger.info(f"{log_identifier} Using provided phone number as fallback: {phone_number_original}")
+
             else:
                 phone_status = "Provided_In_Input"
+                df.at[index, 'found_number'] = phone_number_original
                 logger.info(f"{log_identifier} Phone number retrieval skipped as a value already exists: '{phone_number_original}'")
+            
             df.at[index, 'PhoneNumber_Status'] = phone_status
 
             # --- 5. LLM Call 3: Match Partner ---

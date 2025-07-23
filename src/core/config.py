@@ -129,6 +129,8 @@ class AppConfig:
         enable_slack_notifications (bool): Enable/disable Slack notifications.
         slack_bot_token (Optional[str]): Slack Bot User OAuth Token.
         slack_channel_id (Optional[str]): Slack channel ID for notifications.
+        slack_test_channel_id (Optional[str]): Slack channel ID for test notifications.
+        test_mode (bool): Flag to indicate if the application is in test mode.
  
     Methods:
         __init__(): Initializes AppConfig by loading values from environment
@@ -203,7 +205,8 @@ class AppConfig:
     def __init__(self,
                  input_file_override: Optional[str] = None,
                  row_range_override: Optional[str] = None,
-                 run_id_suffix_override: Optional[str] = None):
+                 run_id_suffix_override: Optional[str] = None,
+                 test_mode: bool = False):
         """
         Initializes the AppConfig instance.
 
@@ -217,7 +220,10 @@ class AppConfig:
                 (e.g., "1-1000") will be used, overriding the .env setting.
             run_id_suffix_override (Optional[str]): If provided, this string will be
                 appended to the run ID, overriding the .env setting.
+            test_mode (bool): If True, the application will run in test mode.
         """
+        self.test_mode = test_mode
+
         # --- Scraper Configuration ---
         user_agents_str = os.getenv('SCRAPER_USER_AGENTS', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
         self.user_agents: List[str] = [ua.strip() for ua in user_agents_str.split(',') if ua.strip()]
@@ -386,6 +392,7 @@ class AppConfig:
         target_country_codes_str: str = os.getenv('TARGET_COUNTRY_CODES', 'DE,CH,AT') # Germany, Switzerland, Austria
         self.target_country_codes: List[str] = [code.strip().upper() for code in target_country_codes_str.split(',') if code.strip()]
         self.default_region_code: Optional[str] = os.getenv('DEFAULT_REGION_CODE', 'DE') # Default region for parsing if others fail
+        self.force_phone_extraction: bool = os.getenv('FORCE_PHONE_EXTRACTION', 'False').lower() == 'true'
 
         # --- Data Handling & Input Profiling ---
         self.input_excel_file_path: str = input_file_override or os.getenv('INPUT_EXCEL_FILE_PATH', 'data_to_be_inputed.xlsx')  # Relative to project root
@@ -456,6 +463,7 @@ class AppConfig:
         self.enable_slack_notifications: bool = os.getenv('ENABLE_SLACK_NOTIFICATIONS', 'False').lower() == 'true'
         self.slack_bot_token: Optional[str] = os.getenv('SLACK_BOT_TOKEN')
         self.slack_channel_id: Optional[str] = os.getenv('SLACK_CHANNEL_ID')
+        self.slack_test_channel_id: Optional[str] = os.getenv('SLACK_TEST_CHANNEL_ID')
 
         # --- Page Type Classification Keywords ---
         page_type_about_str: str = os.getenv('PAGE_TYPE_KEYWORDS_ABOUT', 'about,about-us,company,profile,mission,vision,team,unternehmen,profil,ueber-uns,uber-uns')

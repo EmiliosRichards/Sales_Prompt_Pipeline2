@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import argparse # Import argparse
-
+import sys
 from dotenv import load_dotenv
 # from pathlib import Path # No longer used directly for augmented report path here
 
@@ -42,11 +42,13 @@ def main(args) -> None:
     Main entry point for the phone validation pipeline.
     Orchestrates the entire process from data loading to report generation.
     """
+    run_command = " ".join(sys.argv)
     # Initialize AppConfig with overrides from command-line arguments
     app_config: AppConfig = AppConfig(
         input_file_override=args.input_file,
         row_range_override=args.range,
-        run_id_suffix_override=args.suffix
+        run_id_suffix_override=args.suffix,
+        test_mode=args.test
     )
     pipeline_start_time = time.time()
     
@@ -238,7 +240,8 @@ def main(args) -> None:
                 true_base_scraper_status=true_base_scraper_status,
                 original_phone_col_name_for_profile=original_phone_col_name,
                 original_input_file_path=input_file_path_abs,
-                sales_prompt_path=None
+                sales_prompt_path=None,
+                run_command=run_command
             )
 
     except Exception as pipeline_exec_error:
@@ -281,6 +284,11 @@ if __name__ == '__main__':
         "-s", "--suffix",
         type=str,
         help="A custom suffix to append to the run ID for easier identification (e.g., 'batch1'). Overrides RUN_ID_SUFFIX in the .env file."
+    )
+    parser.add_argument(
+        "-t", "--test",
+        action="store_true",
+        help="Run in test mode, sending notifications to the test Slack channel."
     )
     args = parser.parse_args()
 
