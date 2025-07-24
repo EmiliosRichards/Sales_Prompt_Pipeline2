@@ -29,3 +29,6 @@ test_output.txt
 cache/
 
 output_data/
+
+/data/live_reports_for_regen
+/regenerated_reports
