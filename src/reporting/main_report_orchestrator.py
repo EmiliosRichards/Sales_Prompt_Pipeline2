@@ -47,7 +47,8 @@ def generate_all_reports(
     true_base_scraper_status: Dict[str, str],  # Kept for potential use by legacy reports
     original_phone_col_name_for_profile: Optional[str],  # May become unused if augmented report is fully deprecated
     original_input_file_path: str,
-    sales_prompt_path: Optional[str] = None
+    sales_prompt_path: Optional[str] = None,
+    run_command: Optional[str] = None
 ) -> None:
     """
     Orchestrates the generation of all standard pipeline reports.
@@ -114,7 +115,8 @@ def generate_all_reports(
                 run_id=run_id,
                 input_file=os.path.basename(original_input_file_path),
                 rows_processed=len(all_golden_partner_match_outputs),
-                mode=app_config.input_file_profile_name
+                mode=app_config.input_file_profile_name,
+                run_command=run_command or ""
             )
         if sales_outreach_report_path_excel:
             send_slack_notification(
@@ -124,7 +126,8 @@ def generate_all_reports(
                 run_id=run_id,
                 input_file=os.path.basename(original_input_file_path),
                 rows_processed=len(all_golden_partner_match_outputs),
-                mode=app_config.input_file_profile_name
+                mode=app_config.input_file_profile_name,
+                run_command=run_command or ""
             )
         else:
             logger.error("Failed to generate sales outreach report.")

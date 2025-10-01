@@ -12,7 +12,7 @@ from src.phone_retrieval.processing.pipeline_flow import execute_pipeline_flow
 
 logger = logging.getLogger(__name__)
 
-def retrieve_phone_numbers_for_url(url: str, company_name: str) -> Tuple[Optional[List[ConsolidatedPhoneNumber]], str]:
+def retrieve_phone_numbers_for_url(url: str, company_name: str, app_config: AppConfig) -> Tuple[Optional[List[ConsolidatedPhoneNumber]], str]:
     """
     Retrieves phone numbers for a given URL by running a simplified, in-memory version
     of the phone retrieval pipeline.
@@ -20,6 +20,7 @@ def retrieve_phone_numbers_for_url(url: str, company_name: str) -> Tuple[Optiona
     Args:
         url: The URL to scrape for phone numbers.
         company_name: The name of the company associated with the URL.
+        app_config: The application configuration object.
 
     Returns:
         A tuple containing:
@@ -34,8 +35,7 @@ def retrieve_phone_numbers_for_url(url: str, company_name: str) -> Tuple[Optiona
     import pandas as pd
     df = pd.DataFrame([{"GivenURL": url, "CompanyName": company_name}])
 
-    # Use a temporary, in-memory configuration for the phone retrieval
-    app_config = AppConfig()
+    # Use the provided app_config for the phone retrieval
     llm_extractor = GeminiLLMExtractor(config=app_config)
 
     # We need to mock some of the pipeline's dependencies, like the failure writer

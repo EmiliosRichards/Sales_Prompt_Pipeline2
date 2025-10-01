@@ -13,7 +13,8 @@ def send_slack_notification(
     run_id: str,
     input_file: str,
     rows_processed: int,
-    mode: str
+    mode: str,
+    run_command: str
 ):
     """
     Sends a notification with a file to a Slack channel.
@@ -26,13 +27,16 @@ def send_slack_notification(
         input_file (str): The name of the input file.
         rows_processed (int): The number of rows processed.
         mode (str): The processing mode/profile.
+        run_command (str): The command used to execute the pipeline.
     """
     if not config.enable_slack_notifications:
         logger.info("Slack notifications are disabled. Skipping.")
         return
 
-    if not all([config.slack_bot_token, config.slack_channel_id]):
-        logger.warning("Slack bot token or channel ID is not configured. Skipping notification.")
+    channel_id = config.slack_test_channel_id if config.test_mode else config.slack_channel_id
+
+    if not all([config.slack_bot_token, channel_id]):
+        logger.warning("Slack bot token or channel ID is not configured for the selected mode. Skipping notification.")
         return
 
     client = WebClient(token=config.slack_bot_token)
@@ -43,12 +47,13 @@ Mode: `{mode}`
 Input File: `{input_file}`
 Rows Processed: {rows_processed}
 Run ID: `{run_id}`
+Command: `{run_command}`
 ---------------------------------------------
 Report is attached."""
 
     try:
         response = client.files_upload_v2(
-            channel=config.slack_channel_id,
+            channel=channel_id,
             file=file_path,
             title=os.path.basename(file_path),
             initial_comment=message,
