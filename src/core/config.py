@@ -158,6 +158,15 @@ class AppConfig:
             "Telefonnummer": "GivenPhoneNumber",
             "_original_phone_column_name": "Telefonnummer"
         },
+        "manuav_contacts_2025": {
+            "firma": "CompanyName",
+            "url": "GivenURL",
+            "Telefonnummer": "PhoneNumber",
+            "Beschreibung": "Description",
+            "beschreibung": "Description",
+            "Kategorie": "Industry",
+            "_original_phone_column_name": "Telefonnummer"
+        },
         "lean_formatted": {
             "Company Name": "CompanyName",
             "URL": "GivenURL",
@@ -197,6 +206,37 @@ class AppConfig:
             "_new_phone_column_name": "PhoneNumber_Found",
             "_new_split_number_col": "PhoneNumber",
             "_new_split_details_col": "PhoneDetails"
+        }
+        ,
+        "company_semicolon": {
+            "Company": "CompanyName",
+            "Website": "GivenURL",
+            "Short Description": "Description",
+            "Industry": "Industry",
+            "Company Phone": "PhoneNumber",
+            "_original_phone_column_name": "Company Phone"
+        }
+        ,
+        "pflege_plus_exhibitors": {
+            "company_name": "CompanyName",
+            "website": "GivenURL",
+            "phone": "PhoneNumber",
+            "email": "Email",
+            "description": "Description",
+            "categories": "categories",
+            "products": "products",
+            "_original_phone_column_name": "phone"
+        }
+        ,
+        "pflege_procare_exhibitors": {
+            "company_name": "CompanyName",
+            "website": "GivenURL",
+            "phone": "PhoneNumber",
+            "email": "Email",
+            "description": "Description",
+            "categories": "categories",
+            "products": "products",
+            "_original_phone_column_name": "phone"
         }
     }
 
@@ -367,14 +407,11 @@ class AppConfig:
         
         # --- Language-Specific Prompt Configuration ---
         self.sales_prompt_language: str = os.getenv('SALES_PROMPT_LANGUAGE', 'en').lower()
-        
-        if self.sales_prompt_language == 'de':
-            self.PROMPT_PATH_GERMAN_PARTNER_MATCHING: str = get_clean_path('PROMPT_PATH_GERMAN_PARTNER_MATCHING', 'prompts/german_partner_matching_prompt.txt')
-            self.PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION: str = get_clean_path('PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION', 'prompts/german_sales_pitch_generation_prompt.txt')
-        else:
-            # English prompts would be defined here if they existed
-            self.PROMPT_PATH_GERMAN_PARTNER_MATCHING: str = get_clean_path('PROMPT_PATH_GERMAN_PARTNER_MATCHING', 'prompts/german_partner_matching_prompt.txt')
-            self.PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION: str = get_clean_path('PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION', 'prompts/german_sales_pitch_generation_prompt.txt')
+        # Resolve once to avoid redeclaration warnings; defaults currently point to German prompts
+        partner_prompt_default = 'prompts/german_partner_matching_prompt.txt'
+        sales_pitch_prompt_default = 'prompts/german_sales_pitch_generation_prompt.txt'
+        self.PROMPT_PATH_GERMAN_PARTNER_MATCHING: str = get_clean_path('PROMPT_PATH_GERMAN_PARTNER_MATCHING', partner_prompt_default)
+        self.PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION: str = get_clean_path('PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION', sales_pitch_prompt_default)
         self.MAX_GOLDEN_PARTNERS_IN_PROMPT: int = int(os.getenv('MAX_GOLDEN_PARTNERS_IN_PROMPT', '10'))
  
         # --- URL Probing Configuration ---

@@ -1,4 +1,4 @@
-You are an expert business analyst. Your task is to determine if a company is primarily B2B and if it has the capacity to serve over 1,000 customers, based *only* on the text provided.
+You are an expert business analyst. Your task is to determine if a company is primarily B2B and if it likely has an addressable market of at least 1,000 viable prospective customers (i.e., ≥1,000 organizations that could plausibly buy the product/service), based *only* on the text provided.
 
 **Analysis Guidelines:**
 
@@ -7,10 +7,11 @@ You are an expert business analyst. Your task is to determine if a company is pr
     *   **"No"**: The company primarily sells to individual consumers (B2C). Keywords: "personal use", "for individuals", "shop now" (in a retail context).
     *   **"Unknown"**: The text does not provide enough information to make a clear determination.
 
-2.  **Capacity Status (`serves_1000_customers`)**:
-    *   **"Yes"**: The company shows evidence of scale or operates in an industry that implies scale. This includes software (SaaS), manufacturing, e-commerce platforms, and logistics/transportation networks. Keywords: "enterprise", "scalable", "global", "thousands of customers", "large-scale", "platform", "network", "multiple locations", "branches". The potential to serve many customers is more important than the current number. If the text is ambiguous but suggests a non-local operation (e.g., multiple offices), you should default to "Yes".
-    *   **"No"**: The company appears small or localized. Keywords: "small team", "local", "boutique", "serving our community", "10 employees". A local restaurant or small consultancy typically falls here.
-    *   **"Unknown"**: Use this only when there is a complete lack of information regarding the company's scale or scope. If there are any hints of a larger operation, prefer "Yes".
+2.  **Addressable Market Status (`serves_1000_customers`)**:
+    Interpret this field as “likely has ≥1,000 viable prospective customers,” not operational capacity to serve them simultaneously.
+    *   **"Yes"**: The offering is horizontal (e.g., generic B2B software, standard equipment, services used across many industries) or targets a large, well-populated vertical, with operations suggesting multi-region/national/international reach (e.g., multiple offices, global presence, many industries mentioned). Indicators: “enterprise”, “for companies”, “platform”, “used by X industries”, “nationwide”, “global”, “network of partners”, “SaaS used by teams/companies”, “wholesale”.
+    *   **"No"**: The product/service is very niche or hyper‑local such that there likely are <1,000 prospective organizations (e.g., a single-city service, custom one‑off integrations for a tiny segment, ultra‑specialized equipment serving a handful of institutions). Indicators: “local only”, “serves our town/community”, single small locality with no suggestion of scale, highly specialized niche with few buyers.
+    *   **"Unknown"**: The text provides insufficient evidence either way.
 
 **Input Text:**
 ---
@@ -18,7 +19,7 @@ You are an expert business analyst. Your task is to determine if a company is pr
 ---
 
 **Output Format:**
-Respond with a JSON object matching this schema. Provide a concise reason for each decision, quoting from the text if possible.
+Respond with a JSON object matching this schema. Provide a concise reason for each decision, quoting from the text if possible. Keep answers conservative; if unclear, prefer "Unknown" rather than guessing.
 {{
     "is_b2b": "Yes", "No", or "Unknown",
     "is_b2b_reason": "Brief explanation for the B2B status decision.",

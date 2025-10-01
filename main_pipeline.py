@@ -48,6 +48,9 @@ def main(args) -> None:
         row_range_override=args.range,
         run_id_suffix_override=args.suffix
     )
+    # Allow overriding the input profile at runtime
+    if getattr(args, 'input_profile', None):
+        app_config.input_file_profile_name = args.input_profile
     pipeline_start_time = time.time()
     
     # 1. Initialize Run ID and Metrics
@@ -212,7 +215,9 @@ def main(args) -> None:
             run_id=run_id,
             failure_writer=failure_writer,
             run_metrics=run_metrics,
-            golden_partner_summaries=golden_partner_summaries
+            golden_partner_summaries=golden_partner_summaries,
+            skip_prequalification=getattr(args, 'skip_prequalification', False),
+            pitch_from_description=getattr(args, 'pitch_from_description', False)
         )
         run_metrics["data_processing_stats"]["row_level_failure_summary"] = row_level_failure_counts # Update from flow
         logger.info("Core pipeline processing flow finished.")
@@ -281,6 +286,21 @@ if __name__ == '__main__':
         "-s", "--suffix",
         type=str,
         help="A custom suffix to append to the run ID for easier identification (e.g., 'batch1'). Overrides RUN_ID_SUFFIX in the .env file."
+    )
+    parser.add_argument(
+        "--input-profile",
+        type=str,
+        help="Override the INPUT_FILE_PROFILE_NAME (e.g., 'company_semicolon')."
+    )
+    parser.add_argument(
+        "--pitch-from-description",
+        action="store_true",
+        help="Skip B2B/capacity pre-qualification and skip scraping; use the Description (or Combined_Description) text to generate the sales pitch."
+    )
+    parser.add_argument(
+        "--skip-prequalification",
+        action="store_true",
+        help="Run full scraping and LLM flow but DO NOT exclude rows based on B2B/serves_1000 pre-qualification (pre-qual is bypassed)."
     )
     args = parser.parse_args()
 

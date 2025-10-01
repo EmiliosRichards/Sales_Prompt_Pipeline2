@@ -42,6 +42,7 @@ from src.extractors.llm_tasks.b2b_capacity_check_task import check_b2b_and_capac
 from src.utils.helpers import log_row_failure, sanitize_filename_component
 from src.processing.url_processor import process_input_url
 from src.phone_retrieval.retrieval_wrapper import retrieve_phone_numbers_for_url
+from src.utils.helpers import should_attempt_phone_retrieval
 from src.reporting.live_csv_reporter import LiveCsvReporter
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ def execute_pipeline_flow(
     failure_writer: Any,  # csv.writer object
     run_metrics: Dict[str, Any],
     golden_partner_summaries: List[Dict[str, Any]],
+    skip_prequalification: bool = False,
+    pitch_from_description: bool = False,
 ) -> PipelineOutput:
     """
     Executes the core data processing flow of the pipeline.
@@ -209,59 +212,199 @@ def execute_pipeline_flow(
 
         try:
             assert processed_url is not None
-            run_metrics["scraping_stats"]["urls_processed_for_scraping"] += 1
-            scrape_task_start_time = time.time()
+            scraped_text_to_use = None
 
-            # --- 2. Scrape Website ---
-            logger.info(f"{log_identifier} Starting website scraping for: {processed_url}")
-            # scraped_pages_details: List[Tuple[str, str, str]]  # (content_file, source_url, page_type)
-            # scraper_status: str
-            # collected_summary_text: Optional[str]
-            
-            # scrape_website returns:
-            # (scraped_pages_details, scraper_status, final_canonical_entry_url, collected_summary_text)
-            _, scraper_status, final_canonical_entry_url, collected_summary_text = asyncio.run(
-                scrape_website(processed_url, run_output_dir, company_name_str, globally_processed_urls, index, run_id)
-            )
-            run_metrics["tasks"].setdefault("scrape_website_total_duration_seconds", 0)
-            run_metrics["tasks"]["scrape_website_total_duration_seconds"] += (time.time() - scrape_task_start_time)
+            if pitch_from_description:
+                # Use description text directly; skip scraping
+                # Try Description-like columns
+                candidate_desc_cols = ['Combined_Description', 'Description']
+                # Use the already-resolved active_profile to infer mapped Description
+                if active_profile:
+                    for original_name, mapped_name in active_profile.items():
+                        if not original_name.startswith('_') and mapped_name == 'Description':
+                            candidate_desc_cols.append('Description')
+                            break
+                for col in candidate_desc_cols:
+                    if col in df.columns:
+                        try:
+                            val = df.at[index, col]
+                            if isinstance(val, str) and val.strip():
+                                scraped_text_to_use = val
+                                break
+                        except Exception:
+                            continue
+                df.at[index, 'ScrapingStatus'] = 'Used_Description_Only'
+                current_row_scraper_status = 'Used_Description_Only'
+                true_base_domain_for_row = get_canonical_base_url(processed_url)
+                df.at[index, 'CanonicalEntryURL'] = true_base_domain_for_row
+            else:
+                run_metrics["scraping_stats"]["urls_processed_for_scraping"] += 1
+                scrape_task_start_time = time.time()
 
-            df.at[index, 'ScrapingStatus'] = scraper_status
-            true_base_domain_for_row = get_canonical_base_url(final_canonical_entry_url) \
-                if final_canonical_entry_url else None
-            df.at[index, 'CanonicalEntryURL'] = true_base_domain_for_row # Store true_base
-            current_row_scraper_status = scraper_status
-            # Store status for the specific pathful URL that was the entry point for scraping
-            canonical_site_pathful_scraper_status[
-                final_canonical_entry_url if final_canonical_entry_url else processed_url
-            ] = scraper_status
+                # --- 2. Scrape Website ---
+                logger.info(f"{log_identifier} Starting website scraping for: {processed_url}")
+                _, scraper_status, final_canonical_entry_url, collected_summary_text = asyncio.run(
+                    scrape_website(processed_url, run_output_dir, company_name_str, globally_processed_urls, index, run_id)
+                )
+                run_metrics["tasks"].setdefault("scrape_website_total_duration_seconds", 0)
+                run_metrics["tasks"]["scrape_website_total_duration_seconds"] += (time.time() - scrape_task_start_time)
 
-            scraped_text_to_use = collected_summary_text
+                df.at[index, 'ScrapingStatus'] = scraper_status
+                true_base_domain_for_row = get_canonical_base_url(final_canonical_entry_url) \
+                    if final_canonical_entry_url else None
+                df.at[index, 'CanonicalEntryURL'] = true_base_domain_for_row # Store true_base
+                current_row_scraper_status = scraper_status
+                canonical_site_pathful_scraper_status[
+                    final_canonical_entry_url if final_canonical_entry_url else processed_url
+                ] = scraper_status
+
+                scraped_text_to_use = collected_summary_text
 
             # If scraping yielded no text for any reason, try the fallback description.
             if not scraped_text_to_use or not scraped_text_to_use.strip():
                 logger.warning(f"{log_identifier} No text available from scraping (Status: {current_row_scraper_status}). Attempting to use fallback description.")
-                fallback_text = df.at[index, "Combined_Description"]
-                if fallback_text and fallback_text.strip():
+                # Try to use a fallback description column that exists for the active profile
+                # Prefer commonly used names, then fall back to whatever the profile maps for 'Description'
+                possible_fallback_cols = [
+                    'Combined_Description',
+                    'Description',
+                    'Beschreibung',
+                    'beschreibung',
+                    'categories',
+                    'products'
+                ]
+                # Add any profile-mapped name for Description if provided
+                try:
+                    active_profile_local = app_config.INPUT_COLUMN_PROFILES.get(
+                        app_config.input_file_profile_name,
+                        app_config.INPUT_COLUMN_PROFILES.get('default', {})
+                    )
+                    if isinstance(active_profile_local, dict):
+                        for original_name, mapped_name in active_profile_local.items():
+                            if not original_name.startswith('_') and mapped_name == 'Description':
+                                # Consider both the renamed column 'Description' and the original source name
+                                if original_name not in possible_fallback_cols:
+                                    possible_fallback_cols.append(original_name)
+                except Exception:
+                    pass
+
+                fallback_text = None
+                for col_name in possible_fallback_cols:
+                    if col_name in df.columns:
+                        try:
+                            val = df.at[index, col_name]
+                            if isinstance(val, str) and val.strip():
+                                fallback_text = val
+                                break
+                        except Exception:
+                            continue
+                # If both categories and products exist, concatenate them for richer context
+                if not fallback_text:
+                    try:
+                        cat = df.at[index, 'categories'] if 'categories' in df.columns else ''
+                        prod = df.at[index, 'products'] if 'products' in df.columns else ''
+                        combo = "\n\n".join([s for s in [str(cat).strip(), str(prod).strip()] if s])
+                        if combo.strip():
+                            fallback_text = combo
+                    except Exception:
+                        pass
+
+                if fallback_text and isinstance(fallback_text, str) and fallback_text.strip():
                     scraped_text_to_use = fallback_text
                     current_row_scraper_status = 'Used_Fallback_Description'
                     df.at[index, 'ScrapingStatus'] = current_row_scraper_status
                     logger.info(f"{log_identifier} Successfully used fallback description.")
                 else:
-                    # If there's no scraped text AND no fallback, then we must skip.
-                    logger.warning(f"{log_identifier} No fallback description available. Skipping LLM calls.")
+                    # If there's no scraped text AND no fallback, optionally synthesize minimal context
+                    # so the LLM can still proceed (especially when --skip-prequalification is used).
+                    if skip_prequalification:
+                        industry_val = None
+                        for cand in [
+                            'Industry', 'Kategorie', 'category', 'industry']:
+                            if cand in df.columns:
+                                try:
+                                    v = df.at[index, cand]
+                                    if isinstance(v, str) and v.strip():
+                                        industry_val = v.strip()
+                                        break
+                                except Exception:
+                                    pass
+                        synthesized = f"{company_name_str} — Website: {given_url_original_str}."
+                        if industry_val:
+                            synthesized += f" Industry: {industry_val}."
+                        logger.warning(f"{log_identifier} No scraped/fallback text. Using synthesized minimal context for LLM calls.")
+                        scraped_text_to_use = synthesized
+                    else:
+                        logger.warning(f"{log_identifier} No fallback description available. Skipping LLM calls.")
+                        log_row_failure(
+                            failure_writer, index, company_name_str, given_url_original_str,
+                            f"LLM_Input_NoTextAvailable",
+                            f"Scraper status was '{current_row_scraper_status}', and no text was collected or available as a fallback.",
+                            datetime.now().isoformat(),
+                            json.dumps({
+                                "pathful_canonical_url": final_canonical_entry_url,
+                                "true_base_domain": true_base_domain_for_row
+                            }),
+                            associated_pathful_canonical_url=final_canonical_entry_url
+                        )
+                        row_level_failure_counts["LLM_Input_NoTextAvailable"] += 1
+                        rows_failed_count += 1
+                        all_golden_partner_match_outputs.append(
+                            GoldenPartnerMatchOutput(
+                                analyzed_company_url=given_url_original_str,
+                                analyzed_company_attributes=DetailedCompanyAttributes(
+                                    input_summary_url=given_url_original_str
+                                ),
+                                match_rationale_features=["No text collected from website scraping and no fallback"],
+                                scrape_status=current_row_scraper_status
+                            )
+                        )
+                        continue
+            
+            logger.info(f"{log_identifier} Collected {len(scraped_text_to_use)} characters for LLM processing.")
+
+            # --- 3a. Pre-qualification (optional) ---
+            llm_file_prefix_row = sanitize_filename_component(
+                f"Row{index}_{company_name_str[:20]}_{str(time.time())[-5:]}", max_len=50
+            )
+            if not skip_prequalification:
+                b2b_capacity_tuple = check_b2b_and_capacity(
+                    gemini_client=gemini_client,
+                    config=app_config,
+                    company_text=scraped_text_to_use, # Use full text for this check
+                    llm_context_dir=llm_context_dir,
+                    llm_requests_dir=llm_requests_dir,
+                    file_identifier_prefix=llm_file_prefix_row,
+                    triggering_input_row_id=index,
+                    triggering_company_name=company_name_str
+                )
+                b2b_analysis_obj = b2b_capacity_tuple[0]
+                if b2b_capacity_tuple[2]: # token_stats
+                    run_metrics["llm_processing_stats"]["total_llm_prompt_tokens"] += b2b_capacity_tuple[2].get("prompt_tokens", 0)
+                    run_metrics["llm_processing_stats"]["total_llm_completion_tokens"] += b2b_capacity_tuple[2].get("completion_tokens", 0)
+                    run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += b2b_capacity_tuple[2].get("total_tokens", 0)
+                    run_metrics["llm_processing_stats"]["llm_calls_b2b_capacity_check"] = run_metrics["llm_processing_stats"].get("llm_calls_b2b_capacity_check", 0) + 1
+
+                if not b2b_analysis_obj or b2b_analysis_obj.is_b2b != "Yes" or b2b_analysis_obj.serves_1000_customers == "No":
+                    failure_reason = "B2B_Capacity_Check_Failed"
+                    if b2b_analysis_obj:
+                        df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
+                        df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
+                        df.at[index, 'is_b2b_reason'] = b2b_analysis_obj.is_b2b_reason
+                        df.at[index, 'serves_1000_reason'] = b2b_analysis_obj.serves_1000_customers_reason
+                        if b2b_analysis_obj.is_b2b != "Yes":
+                            failure_reason = "Not_B2B"
+                        elif b2b_analysis_obj.serves_1000_customers == "No":
+                            failure_reason = "Capacity_Under_1000"
+
+                    logger.warning(f"{log_identifier} Company failed B2B/capacity check. Reason: {failure_reason}")
                     log_row_failure(
                         failure_writer, index, company_name_str, given_url_original_str,
-                        f"LLM_Input_NoTextAvailable",
-                        f"Scraper status was '{current_row_scraper_status}', and no text was collected or available as a fallback.",
+                        f"PreQual_{failure_reason}", "Company did not pass pre-qualification checks.",
                         datetime.now().isoformat(),
-                        json.dumps({
-                            "pathful_canonical_url": final_canonical_entry_url,
-                            "true_base_domain": true_base_domain_for_row
-                        }),
-                        associated_pathful_canonical_url=final_canonical_entry_url
+                        json.dumps({"raw_response": b2b_capacity_tuple[1] or "N/A"})
                     )
-                    row_level_failure_counts["LLM_Input_NoTextAvailable"] += 1
+                    row_level_failure_counts[f"PreQual_{failure_reason}"] += 1
                     rows_failed_count += 1
                     all_golden_partner_match_outputs.append(
                         GoldenPartnerMatchOutput(
@@ -269,79 +412,24 @@ def execute_pipeline_flow(
                             analyzed_company_attributes=DetailedCompanyAttributes(
                                 input_summary_url=given_url_original_str
                             ),
-                            match_rationale_features=["No text collected from website scraping and no fallback"],
+                            match_rationale_features=[f"Pre-qualification failed: {failure_reason}"],
                             scrape_status=current_row_scraper_status
                         )
                     )
-                    continue
-            
-            logger.info(f"{log_identifier} Collected {len(scraped_text_to_use)} characters for LLM processing.")
-
-            # --- 3a. LLM Call 1a: B2B and Capacity Check ---
-            llm_file_prefix_row = sanitize_filename_component(
-                f"Row{index}_{company_name_str[:20]}_{str(time.time())[-5:]}", max_len=50
-            )
-            b2b_capacity_tuple = check_b2b_and_capacity(
-                gemini_client=gemini_client,
-                config=app_config,
-                company_text=scraped_text_to_use, # Use full text for this check
-                llm_context_dir=llm_context_dir,
-                llm_requests_dir=llm_requests_dir,
-                file_identifier_prefix=llm_file_prefix_row,
-                triggering_input_row_id=index,
-                triggering_company_name=company_name_str
-            )
-            b2b_analysis_obj = b2b_capacity_tuple[0]
-            if b2b_capacity_tuple[2]: # token_stats
-                run_metrics["llm_processing_stats"]["total_llm_prompt_tokens"] += b2b_capacity_tuple[2].get("prompt_tokens", 0)
-                run_metrics["llm_processing_stats"]["total_llm_completion_tokens"] += b2b_capacity_tuple[2].get("completion_tokens", 0)
-                run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += b2b_capacity_tuple[2].get("total_tokens", 0)
-                run_metrics["llm_processing_stats"]["llm_calls_b2b_capacity_check"] = run_metrics["llm_processing_stats"].get("llm_calls_b2b_capacity_check", 0) + 1
-
-            if not b2b_analysis_obj or b2b_analysis_obj.is_b2b != "Yes" or b2b_analysis_obj.serves_1000_customers == "No":
-                failure_reason = "B2B_Capacity_Check_Failed"
-                if b2b_analysis_obj:
-                    df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
-                    df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
-                    df.at[index, 'is_b2b_reason'] = b2b_analysis_obj.is_b2b_reason
-                    df.at[index, 'serves_1000_reason'] = b2b_analysis_obj.serves_1000_customers_reason
-                    if b2b_analysis_obj.is_b2b != "Yes":
-                        failure_reason = "Not_B2B"
-                    elif b2b_analysis_obj.serves_1000_customers == "No":
-                        failure_reason = "Capacity_Under_1000"
-
-                logger.warning(f"{log_identifier} Company failed B2B/capacity check. Reason: {failure_reason}")
-                log_row_failure(
-                    failure_writer, index, company_name_str, given_url_original_str,
-                    f"PreQual_{failure_reason}", "Company did not pass pre-qualification checks.",
-                    datetime.now().isoformat(),
-                    json.dumps({"raw_response": b2b_capacity_tuple[1] or "N/A"})
-                )
-                row_level_failure_counts[f"PreQual_{failure_reason}"] += 1
-                rows_failed_count += 1
-                all_golden_partner_match_outputs.append(
-                    GoldenPartnerMatchOutput(
-                        analyzed_company_url=given_url_original_str,
-                        analyzed_company_attributes=DetailedCompanyAttributes(
-                            input_summary_url=given_url_original_str
-                        ),
-                        match_rationale_features=[f"Pre-qualification failed: {failure_reason}"],
-                        scrape_status=current_row_scraper_status
-                    )
-                )
-                # If the B2B check fails for a row that used a fallback, we should not proceed.
-                # The status is already set to Used_Fallback_Description and should be preserved.
-                if df.at[index, 'ScrapingStatus'] == 'Used_Fallback_Description':
-                    continue
-                else:
-                    # For other failures, we log and continue as before
-                    continue
-            
-            df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
-            df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
-            df.at[index, 'is_b2b_reason'] = b2b_analysis_obj.is_b2b_reason
-            df.at[index, 'serves_1000_reason'] = b2b_analysis_obj.serves_1000_customers_reason
-            logger.info(f"{log_identifier} Company passed B2B/capacity check.")
+                    if df.at[index, 'ScrapingStatus'] == 'Used_Fallback_Description':
+                        continue
+                    else:
+                        continue
+                
+                df.at[index, 'is_b2b'] = b2b_analysis_obj.is_b2b
+                df.at[index, 'serves_1000'] = b2b_analysis_obj.serves_1000_customers
+                df.at[index, 'is_b2b_reason'] = b2b_analysis_obj.is_b2b_reason
+                df.at[index, 'serves_1000_reason'] = b2b_analysis_obj.serves_1000_customers_reason
+                logger.info(f"{log_identifier} Company passed B2B/capacity check.")
+            else:
+                # Skip pre-qualification; mark as unknown
+                df.at[index, 'is_b2b'] = 'Unknown'
+                df.at[index, 'serves_1000'] = 'Unknown'
 
             # --- 3. LLM Call 1: Generate Website Summary ---
             summary_obj_tuple = generate_website_summary(
@@ -436,31 +524,32 @@ def execute_pipeline_flow(
             logger.info(f"{log_identifier} LLM Call 2 (Attribute Extraction) successful.")
 
             phone_status = "Not_Processed"
-            if not phone_number_original:
-                logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
-                retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
-                if retrieved_numbers:
-                    primary_numbers = [n for n in retrieved_numbers if n.classification == 'Primary']
-                    secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']
-                    
-                    if primary_numbers:
-                        best_number = primary_numbers[0].number
-                        phone_status = "Found_Primary"
-                    elif secondary_numbers:
-                        best_number = secondary_numbers[0].number
-                        phone_status = "Found_Secondary"
+            if not pitch_from_description:
+                if should_attempt_phone_retrieval(phone_number_original):
+                    logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
+                    retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
+                    if retrieved_numbers:
+                        primary_numbers = [n for n in retrieved_numbers if n.classification == 'Primary']
+                        secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']
+                        
+                        if primary_numbers:
+                            best_number = primary_numbers[0].number
+                            phone_status = "Found_Primary"
+                        elif secondary_numbers:
+                            best_number = secondary_numbers[0].number
+                            phone_status = "Found_Secondary"
+                        else:
+                            best_number = None
+                            phone_status = "No_Main_Line_Found"
+                        
+                        if best_number:
+                            df.at[index, 'found_number'] = best_number
+                            logger.info(f"{log_identifier} Found best number: {best_number} (Status: {phone_status})")
                     else:
-                        best_number = None
-                        phone_status = "No_Main_Line_Found"
-                    
-                    if best_number:
-                        df.at[index, 'found_number'] = best_number
-                        logger.info(f"{log_identifier} Found best number: {best_number} (Status: {phone_status})")
+                        logger.warning(f"{log_identifier} Phone number retrieval failed with status: {phone_status}")
                 else:
-                    logger.warning(f"{log_identifier} Phone number retrieval failed with status: {phone_status}")
-            else:
-                phone_status = "Provided_In_Input"
-                logger.info(f"{log_identifier} Phone number retrieval skipped as a value already exists: '{phone_number_original}'")
+                    phone_status = "Provided_In_Input"
+                    logger.info(f"{log_identifier} Phone number retrieval skipped due to acceptable input value: '{phone_number_original}'")
             df.at[index, 'PhoneNumber_Status'] = phone_status
 
             # --- 5. LLM Call 3: Match Partner ---

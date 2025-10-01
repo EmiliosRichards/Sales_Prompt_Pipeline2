@@ -223,6 +223,48 @@ def is_target_country_number_reliable(phone_number_str: str) -> bool:
         logger.debug(f"NumberParseException for '{phone_number_str}' during target country check.")
         return False
 
+def should_attempt_phone_retrieval(phone_number_raw: Optional[str]) -> bool:
+    """Return True if the given phone value is missing or looks like a placeholder/non-number.
+
+    This helps decide whether to run the phone-retrieval pipeline even when a non-empty value exists.
+
+    Rules (ordered):
+    - None or empty/whitespace → attempt retrieval
+    - Placeholder tokens (case-insensitive) like 'na', 'n/a', 'none', 'null', 'nan', '-', '—', 'tbd', 'skip', '?' → attempt
+    - If string contains very few digits (<5) → attempt
+    - Try parsing with phonenumbers; if parsing fails → attempt; else skip retrieval
+    """
+    if phone_number_raw is None:
+        return True
+    if not isinstance(phone_number_raw, str):
+        try:
+            phone_number_raw = str(phone_number_raw)
+        except Exception:
+            return True
+    candidate = phone_number_raw.strip()
+    if candidate == "":
+        return True
+
+    lower = candidate.lower()
+    placeholders = {"na", "n/a", "none", "null", "nan", "-", "—", "tbd", "skip", "?", "0"}
+    if lower in placeholders:
+        return True
+
+    digits = "".join(ch for ch in candidate if ch.isdigit())
+    if len(digits) < 5:
+        return True
+
+    try:
+        # Try without region; if it fails, still try default region 'DE' as a reasonable fallback
+        parsed = phonenumbers.parse(candidate, None)
+        if not phonenumbers.is_possible_number(parsed):
+            # Second attempt with a default region common to dataset
+            parsed2 = phonenumbers.parse(candidate, "DE")
+            return not phonenumbers.is_possible_number(parsed2)
+        return False
+    except NumberParseException:
+        return True
+
 def generate_run_id(suffix: Optional[str] = None) -> str:
     """
     Generates a unique run ID based on the current timestamp.

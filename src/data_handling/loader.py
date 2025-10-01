@@ -266,7 +266,18 @@ def load_and_preprocess_data(
             logger.error(f"DataFrame is None after loading attempt for {file_path}. This indicates an issue with the loading logic or unsupported file for smart read.")
             return None
 
-        logger.info(f"Columns loaded: {df.columns.tolist() if df is not None and not df.empty else 'N/A (DataFrame is None or empty)'}")
+        # Normalize column names: strip whitespace and remove BOM if present
+        try:
+            cleaned_cols = []
+            for c in list(df.columns):
+                name = str(c) if c is not None else ''
+                name = name.replace('\ufeff', '').strip()
+                cleaned_cols.append(name)
+            df.columns = cleaned_cols
+        except Exception:
+            pass
+
+        logger.info(f"Columns loaded (normalized): {df.columns.tolist() if df is not None and not df.empty else 'N/A (DataFrame is None or empty)'}")
 
         if df.empty:
             logger.warning(f"Loaded DataFrame from {file_path} is empty. This could be due to an empty input file, all rows being skipped, or smart read stopping early.")
@@ -286,7 +297,18 @@ def load_and_preprocess_data(
                  return pd.DataFrame() # Return empty DataFrame as a fallback
 
         # Create rename map only for columns present in the DataFrame
-        actual_rename_map = {k: v for k, v in profile_mappings.items() if not k.startswith('_') and k in df.columns}
+        # Also consider case-insensitive matches for source columns to be more forgiving
+        lower_to_actual = {str(c).lower(): c for c in df.columns}
+        actual_rename_map = {}
+        for src_name, dst_name in profile_mappings.items():
+            if src_name.startswith('_'):
+                continue
+            if src_name in df.columns:
+                actual_rename_map[src_name] = dst_name
+            else:
+                cand = lower_to_actual.get(str(src_name).lower())
+                if cand is not None:
+                    actual_rename_map[cand] = dst_name
 
         if actual_rename_map:
              df.rename(columns=actual_rename_map, inplace=True)
