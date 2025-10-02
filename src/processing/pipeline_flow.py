@@ -527,7 +527,11 @@ def execute_pipeline_flow(
             if not pitch_from_description:
                 if should_attempt_phone_retrieval(phone_number_original):
                     logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
-                    retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
+                    try:
+                        retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str, app_config)
+                    except TypeError:
+                        # Backward compatibility with older signature
+                        retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
                     if retrieved_numbers:
                         primary_numbers = [n for n in retrieved_numbers if n.classification == 'Primary']
                         secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']

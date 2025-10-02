@@ -240,6 +240,14 @@ class AppConfig:
             "products": "products",
             "_original_phone_column_name": "phone"
         }
+        ,
+        "emo_hannover_2025": {
+            "Firma": "CompanyName",
+            "Aussteller": "CompanyName",
+            "Website": "GivenURL",
+            "Website Unternehmen": "GivenURL",
+            "_original_phone_column_name": None
+        }
     }
 
     def __init__(self,

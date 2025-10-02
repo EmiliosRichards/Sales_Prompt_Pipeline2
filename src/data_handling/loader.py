@@ -64,6 +64,26 @@ def _is_row_empty(row_values: Iterable[Any]) -> bool:
     return all(pd.isna(value) or (isinstance(value, str) and not value.strip()) for value in row_values)
 
 
+def _detect_csv_delimiter(file_path: str) -> str:
+    """
+    Detect the delimiter used in a CSV. Returns ',' if unsure.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8', newline='') as f:
+            sample = f.read(4096)
+            if not sample:
+                return ','
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|:")
+                return dialect.delimiter or ','
+            except Exception:
+                counts = {sep: sample.count(sep) for sep in [';', ',', '\t', '|', ':']}
+                best = max(counts.items(), key=lambda kv: kv[1])
+                return best[0] if best[1] > 0 else ','
+    except Exception:
+        return ','
+
+
 def load_and_preprocess_data(
     file_path: str,
     app_config_instance: Optional[AppConfig] = None
@@ -210,8 +230,10 @@ def load_and_preprocess_data(
                 # df = pd.DataFrame(data_rows) # Fallback if header is somehow None but data exists
 
             elif file_path.endswith('.csv'):
+                detected_sep = _detect_csv_delimiter(file_path)
+                logger.info(f"Detected CSV delimiter (smart read): '{detected_sep}' for file {file_path}")
                 with open(file_path, mode='r', encoding='utf-8', newline='') as csvfile:
-                    reader = csv.DictReader(csvfile)
+                    reader = csv.DictReader(csvfile, delimiter=detected_sep)
 
                     # 1. Read header
                     try:
@@ -255,7 +277,9 @@ def load_and_preprocess_data(
             logger.info(f"Using standard pandas read. Pandas skiprows argument: {pandas_skiprows_arg}, nrows: {nrows_val}")
             # keep_default_na=False and na_filter=False to prevent pandas from interpreting empty strings as NaN
             if file_path.endswith('.csv'):
-                df = pd.read_csv(file_path, header=0, skiprows=pandas_skiprows_arg, nrows=nrows_val, keep_default_na=False, na_filter=False)
+                detected_sep = _detect_csv_delimiter(file_path)
+                logger.info(f"Detected CSV delimiter: '{detected_sep}' for file {file_path}")
+                df = pd.read_csv(file_path, header=0, skiprows=pandas_skiprows_arg, nrows=nrows_val, keep_default_na=False, na_filter=False, sep=detected_sep)
             elif file_path.endswith(('.xls', '.xlsx')):
                 df = pd.read_excel(file_path, header=0, skiprows=pandas_skiprows_arg, nrows=nrows_val, keep_default_na=False, na_filter=False)
             else:
@@ -313,6 +337,17 @@ def load_and_preprocess_data(
         if actual_rename_map:
              df.rename(columns=actual_rename_map, inplace=True)
         logger.info(f"DataFrame columns after renaming (using profile: '{active_profile_name}'): {df.columns.tolist()}")
+
+        # Drop accidental header rows in data (common in scraped/merged lists)
+        try:
+            header_like_company = {"Aussteller", "Firma"}
+            header_like_url = {"Website", "WebsiteUnternehmen", "Website Unternehmen"}
+            if 'CompanyName' in df.columns:
+                df = df[~df['CompanyName'].astype(str).str.strip().isin(header_like_company)]
+            if 'GivenURL' in df.columns:
+                df = df[~df['GivenURL'].astype(str).str.strip().isin(header_like_url)]
+        except Exception:
+            pass
 
         # Define and initialize new columns required by the pipeline
         new_columns = [
