@@ -271,7 +271,8 @@ def execute_pipeline_flow(
                     'Beschreibung',
                     'beschreibung',
                     'categories',
-                    'products'
+                    'products',
+                    'pdf_text'
                 ]
                 # Add any profile-mapped name for Description if provided
                 try:
@@ -306,6 +307,14 @@ def execute_pipeline_flow(
                         combo = "\n\n".join([s for s in [str(cat).strip(), str(prod).strip()] if s])
                         if combo.strip():
                             fallback_text = combo
+                    except Exception:
+                        pass
+                # If description and pdf_text both exist but description was empty, try pdf_text alone
+                if not fallback_text and 'pdf_text' in df.columns:
+                    try:
+                        pv = df.at[index, 'pdf_text']
+                        if isinstance(pv, str) and pv.strip():
+                            fallback_text = pv
                     except Exception:
                         pass
 

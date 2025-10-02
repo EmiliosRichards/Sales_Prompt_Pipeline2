@@ -248,6 +248,16 @@ class AppConfig:
             "Website Unternehmen": "GivenURL",
             "_original_phone_column_name": None
         }
+        ,
+        "expopharm_exhibitors": {
+            "company_name": "CompanyName",
+            "website": "GivenURL",
+            "phone": "PhoneNumber",
+            "email": "Email",
+            "description": "Description",
+            "pdf_text": "pdf_text",
+            "_original_phone_column_name": "phone"
+        }
     }
 
     def __init__(self,
