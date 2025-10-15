@@ -41,7 +41,7 @@ def send_slack_notification(
 
     client = WebClient(token=config.slack_bot_token)
     
-    message = f"""Shop Confirmation System Pipeline Run Complete
+    message = f"""Sales Prompt Pipeline Fullpipe Run Complete
 ---------------------------------------------
 Mode: `{mode}`
 Input File: `{input_file}`

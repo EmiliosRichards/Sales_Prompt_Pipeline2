@@ -190,6 +190,12 @@ class AppConfig:
             "Industry_Category_Standardized": "Industry",
             "Company Phone": "PhoneNumber"
         },
+        "final_80k_force_extract": {
+            "Company": "CompanyName",
+            "Website": "GivenURL",
+            "Combined_Description": "Combined_Description",
+            "Industry_Category_Standardized": "Industry"
+        },
         "german_standard": {
             "firma": "CompanyName",
             "url": "GivenURL",
@@ -254,6 +260,18 @@ class AppConfig:
             "website": "GivenURL",
             "phone": "PhoneNumber",
             "email": "Email",
+            "description": "Description",
+            "pdf_text": "pdf_text",
+            "_original_phone_column_name": "phone"
+        }
+        ,
+        "altenpflege_products": {
+            "company_name": "CompanyName",
+            "website": "GivenURL",
+            "address": "Address",
+            "phone": "PhoneNumber",
+            "email": "Email",
+            "contacts": "contacts",
             "description": "Description",
             "pdf_text": "pdf_text",
             "_original_phone_column_name": "phone"

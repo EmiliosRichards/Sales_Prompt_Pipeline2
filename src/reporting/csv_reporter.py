@@ -8,12 +8,108 @@ consistent output for easier consumption and review.
 """
 import os
 import logging
+import re
 from typing import List, Dict, Any, Optional
 import pandas as pd
 
 from ..core.schemas import GoldenPartnerMatchOutput, DetailedCompanyAttributes
 
 logger = logging.getLogger(__name__)
+def _parse_contacts_block(text: Optional[str]) -> str:
+    """Extract 'Name | Role | Phone | Email' tuples from noisy contact text.
+
+    Strategy:
+    - Ignore boilerplate/nav lines (e.g., "Mehr Lesen", "Zum Produkt", ...).
+    - Prefer parsing within contact sections (e.g., 'Mitarbeiter', 'Ansprechpartner', 'Contacts').
+    - Detect names as 2–4 capitalized words; capture nearby role (non-phone/non-email)
+      and phone/email within the next few lines.
+    - Return unique entries joined by ' || '.
+    """
+    if not text or not isinstance(text, str):
+        return ""
+
+    raw_lines = [ln.strip() for ln in text.splitlines()]
+    # Drop obvious boilerplate tokens
+    drop_prefixes = {
+        "mehr lesen", "download", "zum hallenplan", "produkte", "zum produkt", "keywords",
+        "wir bieten", "branche", "über uns", "halles", "standnummer", "hersteller",
+        "video", "kontaktinformation", "sprache", "kontakt per e-mail", "zum ausstellerverzeichnis",
+        "hallenplan", "programm", "news", "newsletter", "impressum", "datenschutz", "agb"
+    }
+    lines: List[str] = []
+    for ln in raw_lines:
+        low = ln.lower().strip(': ')
+        if not ln:
+            continue
+        if any(low.startswith(pfx) for pfx in drop_prefixes):
+            continue
+        lines.append(ln)
+
+    # Regexes
+    phone_re = re.compile(r"(\+\d[\d\s()\-]+\d)")
+    tel_re = re.compile(r"tel\.?\s*[:\-]?\s*(\+?\d[\d\s()\-]+\d)", re.IGNORECASE)
+    email_re = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
+    name_re = re.compile(r"^[A-ZÄÖÜ][a-zA-ZÄÖÜäöüß\-']+(\s+[A-ZÄÖÜ][a-zA-ZÄÖÜäöüß\-']+){1,3}$")
+
+    # Only parse after a contacts section marker if present; otherwise parse whole text
+    markers = {"mitarbeiter", "ansprechpartner", "contacts", "kontakt", "team"}
+    start_idx = 0
+    for idx, ln in enumerate(lines):
+        if ln.lower() in markers:
+            start_idx = idx + 1
+            break
+
+    entries: List[str] = []
+    seen = set()
+    i = start_idx
+    while i < len(lines):
+        ln = lines[i]
+        # Remove "E-Mail senden" placeholder-only lines
+        if ln.lower() == "e-mail senden" or ln.lower() == "email senden":
+            i += 1
+            continue
+
+        if name_re.match(ln):
+            name = ln
+            role = ""
+            phone = ""
+            email = ""
+            j = i + 1
+            # collect role if the next non-empty line is not a phone/email
+            while j < len(lines) and lines[j] == "":
+                j += 1
+            if j < len(lines) and not (phone_re.search(lines[j]) or tel_re.search(lines[j]) or email_re.search(lines[j])):
+                # avoid picking obvious non-role markers
+                cand_role = lines[j]
+                if not any(tok in cand_role.lower() for tok in ("zum produkt", "download", "hallenplan")):
+                    role = cand_role
+                j += 1
+
+            # search a few lines for phone/email
+            k = j
+            while k < len(lines) and k < j + 8:
+                if not phone and (m := phone_re.search(lines[k]) or tel_re.search(lines[k])):
+                    # support both regexes
+                    m1 = phone_re.search(lines[k])
+                    m2 = tel_re.search(lines[k])
+                    phone = (m1.group(1) if m1 else m2.group(1)) if (m1 or m2) else ""
+                if not email and (em := email_re.search(lines[k])):
+                    email = em.group(0)
+                if phone and email:
+                    break
+                k += 1
+
+            parts = [p for p in [name, role, phone, email] if p]
+            if name and (phone or email):
+                key = (name, role, phone, email)
+                if key not in seen:
+                    seen.add(key)
+                    entries.append(" | ".join(parts))
+            i = max(k, j, i + 1)
+        else:
+            i += 1
+
+    return " || ".join(entries)
 
 
 def write_sales_outreach_report(
@@ -89,6 +185,7 @@ def write_sales_outreach_report(
                 'ScrapeStatus': None
             }
 
+            parsed_contacts_val = ""
             if original_row_data is not None:
                 row.update({
                     'Company Name': original_row_data.get('CompanyName'),
@@ -103,6 +200,10 @@ def write_sales_outreach_report(
                     'Original Row Number': original_row_data.get('original_row_number'),
                     'ScrapeStatus': original_row_data.get('ScrapingStatus'),
                 })
+                # Parse contacts if present
+                contacts_text = original_row_data.get('contacts') if isinstance(original_row_data, dict) else None
+                if contacts_text:
+                    parsed_contacts_val = _parse_contacts_block(contacts_text)
 
             if item:
                 row.update({
@@ -130,6 +231,9 @@ def write_sales_outreach_report(
                     'Website Clarity Notes': attrs.website_clarity_notes or ''
                 })
             
+            # Optionally attach Parsed_Contacts column when available
+            if parsed_contacts_val:
+                row['Parsed_Contacts'] = parsed_contacts_val
             report_data.append(row)
 
         if not report_data:

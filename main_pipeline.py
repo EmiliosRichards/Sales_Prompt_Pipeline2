@@ -53,6 +53,12 @@ def main(args) -> None:
     # Allow overriding the input profile at runtime
     if getattr(args, 'input_profile', None):
         app_config.input_file_profile_name = args.input_profile
+    # Force phone extraction override from CLI
+    if getattr(args, 'force_phone_extraction', False):
+        try:
+            app_config.force_phone_extraction = True
+        except Exception:
+            pass
     pipeline_start_time = time.time()
     
     # 1. Initialize Run ID and Metrics
@@ -310,10 +316,22 @@ if __name__ == '__main__':
         action="store_true",
         help="Run in test mode, sending notifications to the test Slack channel."
     )
+    parser.add_argument(
+        "--force-phone-extraction",
+        action="store_true",
+        help="Always run phone extraction on every row, even if an input phone exists. Can also be enabled via FORCE_PHONE_EXTRACTION env var."
+    )
     args = parser.parse_args()
 
     # Basic logging config if no handlers are configured yet (e.g., when run directly)
     if not logger.hasHandlers():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
+    # Basic logging config if no handlers are configured yet (e.g., when run directly)
+    if not logger.hasHandlers():
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # Ensure force flag from CLI is reflected in AppConfig instance
+    # AppConfig is created inside main(args); we pass via args and then set attribute after instantiation.
+    # To keep structure, we call main which will construct AppConfig, then we set the flag early in main.
     main(args)

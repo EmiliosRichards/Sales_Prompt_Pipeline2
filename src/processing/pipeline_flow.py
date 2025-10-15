@@ -263,7 +263,28 @@ def execute_pipeline_flow(
             # If scraping yielded no text for any reason, try the fallback description.
             if not scraped_text_to_use or not scraped_text_to_use.strip():
                 logger.warning(f"{log_identifier} No text available from scraping (Status: {current_row_scraper_status}). Attempting to use fallback description.")
-                # Try to use a fallback description column that exists for the active profile
+                # Special-case profile: for 'altenpflege_products' prefer contacts + truncated pdf_text
+                if getattr(app_config, 'input_file_profile_name', '') == 'altenpflege_products':
+                    try:
+                        contacts_val = ''
+                        pdf_val = ''
+                        if 'contacts' in df.columns:
+                            cv = df.at[index, 'contacts']
+                            contacts_val = cv if isinstance(cv, str) else ''
+                        if 'pdf_text' in df.columns:
+                            pv = df.at[index, 'pdf_text']
+                            if isinstance(pv, str):
+                                # limit to avoid bloat
+                                pdf_val = pv.strip()[:4000]
+                        combined = "\n\n".join([s for s in [contacts_val.strip(), pdf_val] if s])
+                        if combined.strip():
+                            scraped_text_to_use = combined
+                            current_row_scraper_status = 'Used_Fallback_Description'
+                            df.at[index, 'ScrapingStatus'] = current_row_scraper_status
+                            logger.info(f"{log_identifier} Used contacts + pdf_text as fallback.")
+                    except Exception:
+                        pass
+                # Try to use a fallback description column that exists for other profiles
                 # Prefer commonly used names, then fall back to whatever the profile maps for 'Description'
                 possible_fallback_cols = [
                     'Combined_Description',
@@ -534,13 +555,14 @@ def execute_pipeline_flow(
 
             phone_status = "Not_Processed"
             if not pitch_from_description:
-                if should_attempt_phone_retrieval(phone_number_original):
-                    logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
-                    try:
-                        retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str, app_config)
-                    except TypeError:
-                        # Backward compatibility with older signature
-                        retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(given_url_original_str, company_name_str)
+                if app_config.force_phone_extraction or should_attempt_phone_retrieval(phone_number_original):
+                    if app_config.force_phone_extraction:
+                        logger.info(f"{log_identifier} Force flag enabled. Attempting phone retrieval.")
+                    else:
+                        logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
+                    retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(
+                        given_url_original_str, company_name_str, app_config
+                    )
                     if retrieved_numbers:
                         primary_numbers = [n for n in retrieved_numbers if n.classification == 'Primary']
                         secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']
