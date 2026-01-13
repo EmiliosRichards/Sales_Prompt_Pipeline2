@@ -276,6 +276,17 @@ class AppConfig:
             "pdf_text": "pdf_text",
             "_original_phone_column_name": "phone"
         }
+        ,
+        # Apollo export: data/Apollo Shopware Partner Germany 1(Sheet1).csv
+        # Intended for running the phone retrieval pipeline in isolation.
+        "apollo_shopware_partner_germany": {
+            "Company Name": "CompanyName",
+            "Website": "GivenURL",
+            # Keep the original phone as "GivenPhoneNumber" for normalization/verification flows.
+            "Company Phone": "GivenPhoneNumber",
+            "Industry": "Industry",
+            "_original_phone_column_name": "Company Phone"
+        }
     }
 
     def __init__(self,
@@ -343,6 +354,19 @@ class AppConfig:
         scraper_timeout_str = os.getenv('SCRAPER_NETWORKIDLE_TIMEOUT_MS', '3000').split('#')[0].strip().strip('\'"')
         self.scraper_networkidle_timeout_ms: int = int(scraper_timeout_str)
         self.snippet_window_chars: int = int(os.getenv('SNIPPET_WINDOW_CHARS', '300'))
+
+        # --- HTTP fallback scraping (used by phone_retrieval scraper) ---
+        # If Playwright fails to fetch content, try a lightweight httpx GET and extract text from returned HTML.
+        # This often helps with simple/static contact/imprint pages.
+        self.scraper_http_fallback_enabled: bool = os.getenv('SCRAPER_HTTP_FALLBACK_ENABLED', 'True').lower() == 'true'
+        self.scraper_http_fallback_timeout_seconds: int = int(os.getenv('SCRAPER_HTTP_FALLBACK_TIMEOUT_SECONDS', '15'))
+        self.scraper_http_fallback_max_bytes: int = int(os.getenv('SCRAPER_HTTP_FALLBACK_MAX_BYTES', '2000000'))  # ~2MB
+        self.scraper_http_fallback_min_text_chars: int = int(os.getenv('SCRAPER_HTTP_FALLBACK_MIN_TEXT_CHARS', '200'))
+        block_kw_raw = os.getenv(
+            'SCRAPER_HTTP_FALLBACK_BLOCK_KEYWORDS',
+            'access denied,captcha,cloudflare,bot detection,verify you are human,enable javascript,forbidden,service unavailable,temporarily unavailable'
+        )
+        self.scraper_http_fallback_block_keywords: List[str] = [k.strip().lower() for k in block_kw_raw.split(',') if k.strip()]
 
         # --- Caching ---
         self.caching_enabled: bool = os.getenv('CACHING_ENABLED', 'True').lower() == 'true'

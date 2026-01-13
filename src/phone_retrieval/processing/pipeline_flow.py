@@ -138,6 +138,21 @@ def execute_pipeline_flow(
             df.at[index, 'CanonicalEntryURL'] = true_base_domain_for_row # This is the true_base
             current_row_scraper_status = scraper_status
 
+            # --- Instrumentation: did we use httpx fallback at least once for this row? ---
+            # The scraper marks fallback-sourced cleaned files with "__httpx_cleaned.txt".
+            try:
+                if "HttpFallbackUsed" not in df.columns:
+                    df["HttpFallbackUsed"] = None
+                used_httpx = False
+                if scraped_pages_details:
+                    for page_file, _, _ in scraped_pages_details:
+                        if isinstance(page_file, str) and "__httpx_cleaned.txt" in page_file:
+                            used_httpx = True
+                            break
+                df.at[index, "HttpFallbackUsed"] = "Yes" if used_httpx else "No"
+            except Exception:
+                pass
+
             # --- Homepage Summarization Logic ---
             if true_base_domain_for_row and \
                (app_config.extraction_profile in ["minimal_plus_summary", "enriched_direct"]) and \
