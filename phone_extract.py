@@ -345,7 +345,9 @@ def _write_augmented_csv(
     top1_src = processed_df["Top_SourceURL_1"] if "Top_SourceURL_1" in processed_df.columns else pd.Series([None] * len(processed_df))
     outcome = processed_df["Final_Row_Outcome_Reason"] if "Final_Row_Outcome_Reason" in processed_df.columns else pd.Series([None] * len(processed_df))
     fault = processed_df["Determined_Fault_Category"] if "Determined_Fault_Category" in processed_df.columns else pd.Series([None] * len(processed_df))
+    http_fb_attempted = processed_df["HttpFallbackAttempted"] if "HttpFallbackAttempted" in processed_df.columns else pd.Series([None] * len(processed_df))
     http_fb = processed_df["HttpFallbackUsed"] if "HttpFallbackUsed" in processed_df.columns else pd.Series([None] * len(processed_df))
+    http_fb_result = processed_df["HttpFallbackResult"] if "HttpFallbackResult" in processed_df.columns else pd.Series([None] * len(processed_df))
     tgt = processed_df["TargetCountryCodes"] if "TargetCountryCodes" in processed_df.columns else pd.Series([None] * len(processed_df))
 
     normalized_numbers: List[Optional[str]] = []
@@ -361,7 +363,9 @@ def _write_augmented_csv(
     original_slice["PhoneSources_Found"] = [(_as_str_or_none(v) or "") for v in top1_src.tolist()]
     original_slice["PhoneExtract_Outcome"] = [(_as_str_or_none(v) or "") for v in outcome.tolist()]
     original_slice["PhoneExtract_FaultCategory"] = [(_as_str_or_none(v) or "") for v in fault.tolist()]
+    original_slice["HttpFallbackAttempted"] = [(_as_str_or_none(v) or "") for v in http_fb_attempted.tolist()]
     original_slice["HttpFallbackUsed"] = [(_as_str_or_none(v) or "") for v in http_fb.tolist()]
+    original_slice["HttpFallbackResult"] = [(_as_str_or_none(v) or "") for v in http_fb_result.tolist()]
 
     original_slice.to_csv(output_path, index=False, encoding="utf-8")
 

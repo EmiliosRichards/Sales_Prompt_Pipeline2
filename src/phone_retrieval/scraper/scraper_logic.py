@@ -23,10 +23,18 @@ config_instance = AppConfig()
 # Setup logger for this module
 logger = logging.getLogger(__name__)
 
-def _is_httpx_fallback_html_usable(html: str, input_row_id: Any, company_name_or_id: str, url: str) -> bool:
-    """Heuristic guardrails to avoid processing obvious block pages / junk HTML."""
+def _is_httpx_fallback_html_usable(
+    html: str,
+    input_row_id: Any,
+    company_name_or_id: str,
+    url: str
+) -> Tuple[bool, str]:
+    """Heuristic guardrails to avoid processing obvious block pages / junk HTML.
+
+    Returns (usable, reason) where reason is a short machine-readable string.
+    """
     if not html or not html.strip():
-        return False
+        return False, "empty_html"
 
     # Extract visible text and check min length (avoid tiny/empty boilerplate)
     text = extract_text_from_html(html)
@@ -36,7 +44,7 @@ def _is_httpx_fallback_html_usable(html: str, input_row_id: Any, company_name_or
             f"[RowID: {input_row_id}, Company: {company_name_or_id}] httpx fallback rejected for {url}: "
             f"extracted text too short ({len(text)} < {min_chars})"
         )
-        return False
+        return False, f"rejected_too_short:{len(text)}<{min_chars}"
 
     # Block page keyword detection
     block_keywords = getattr(config_instance, "scraper_http_fallback_block_keywords", []) or []
@@ -47,9 +55,9 @@ def _is_httpx_fallback_html_usable(html: str, input_row_id: Any, company_name_or
                 f"[RowID: {input_row_id}, Company: {company_name_or_id}] httpx fallback rejected for {url}: "
                 f"block keyword matched '{kw}'"
             )
-            return False
+            return False, f"rejected_block_keyword:{kw}"
 
-    return True
+    return True, "usable"
 
 def normalize_url(url: str) -> str:
     """
@@ -105,10 +113,17 @@ def get_safe_filename(name_or_url: str, for_url: bool = False, max_len: int = 10
         logger.info(f"DEBUG PATH: get_safe_filename (for_url=False) output: '{safe_name_truncated}' (original sanitized: '{safe_name}', max_len: {max_len}) from input '{original_input}'") # DEBUG PATH LENGTH
         return safe_name_truncated
 
-async def _fetch_html_via_httpx(url: str, input_row_id: Any, company_name_or_id: str) -> Tuple[Optional[str], Optional[int]]:
-    """Best-effort HTML fetch using httpx as a fallback when Playwright navigation/content fails."""
+async def _fetch_html_via_httpx(
+    url: str,
+    input_row_id: Any,
+    company_name_or_id: str
+) -> Tuple[Optional[str], Optional[int], str]:
+    """Best-effort HTML fetch using httpx as a fallback when Playwright navigation/content fails.
+
+    Returns (html, status_code, result_reason).
+    """
     if not getattr(config_instance, "scraper_http_fallback_enabled", True):
-        return None, None
+        return None, None, "disabled"
 
     timeout_s = getattr(config_instance, "scraper_http_fallback_timeout_seconds", 15)
     max_bytes = getattr(config_instance, "scraper_http_fallback_max_bytes", 2_000_000)
@@ -132,33 +147,41 @@ async def _fetch_html_via_httpx(url: str, input_row_id: Any, company_name_or_id:
             resp = await client.get(url)
             status = resp.status_code
             if status == 404:
-                return None, status
+                return None, status, "http_404"
             # Only consider HTML-ish responses
             content_type = (resp.headers.get("content-type") or "").lower()
             if "text/html" not in content_type and "application/xhtml" not in content_type and "text/" not in content_type:
-                return None, status
+                return None, status, f"non_html_content_type:{content_type[:80]}"
             # Enforce max bytes to avoid huge downloads
             content_bytes = resp.content or b""
             if max_bytes and len(content_bytes) > max_bytes:
                 content_bytes = content_bytes[:max_bytes]
             text = content_bytes.decode(resp.encoding or "utf-8", errors="replace")
             if not text.strip():
-                return None, status
-            if not _is_httpx_fallback_html_usable(text, input_row_id, company_name_or_id, url):
-                return None, status
+                return None, status, "empty_body"
+            usable, reason = _is_httpx_fallback_html_usable(text, input_row_id, company_name_or_id, url)
+            if not usable:
+                return None, status, reason
             logger.info(
                 f"[RowID: {input_row_id}, Company: {company_name_or_id}] httpx fallback fetched HTML for {url}. Status: {status}, bytes: {len(content_bytes)}"
             )
-            return text, status
+            return text, status, "success"
     except Exception as e:
         logger.info(
             f"[RowID: {input_row_id}, Company: {company_name_or_id}] httpx fallback failed for {url}: {type(e).__name__} - {e}"
         )
-        return None, None
+        return None, None, f"exception:{type(e).__name__}"
 
 
-async def fetch_page_content(page, url: str, input_row_id: Any, company_name_or_id: str) -> Tuple[Optional[str], Optional[int], str]:
+async def fetch_page_content(
+    page,
+    url: str,
+    input_row_id: Any,
+    company_name_or_id: str
+) -> Tuple[Optional[str], Optional[int], str, bool, Optional[str]]:
     logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Navigating to URL: {url}")
+    httpx_attempted = False
+    httpx_result: Optional[str] = None
     try:
         response = await page.goto(url, timeout=config_instance.default_navigation_timeout, wait_until='domcontentloaded')
         if response:
@@ -178,55 +201,67 @@ async def fetch_page_content(page, url: str, input_row_id: Any, company_name_or_
                         f"[RowID: {input_row_id}, Company: {company_name_or_id}] Playwright page.content() failed for {url}: "
                         f"{type(e_content).__name__} - {e_content}. Trying httpx fallback."
                     )
-                    fb_html, fb_status = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+                    httpx_attempted = True
+                    fb_html, fb_status, fb_result = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+                    httpx_result = fb_result
                     if fb_html:
-                        return fb_html, fb_status or response.status, "httpx_fallback"
-                    return None, response.status, "playwright_content_error"
+                        return fb_html, fb_status or response.status, "httpx_fallback", httpx_attempted, httpx_result
+                    return None, response.status, "playwright_content_error", httpx_attempted, httpx_result
                 logger.debug(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Content fetched successfully for {url}.")
-                return content, response.status, "playwright"
+                return content, response.status, "playwright", httpx_attempted, httpx_result
             else:
                 logger.warning(f"[RowID: {input_row_id}, Company: {company_name_or_id}] HTTP error for {url}: Status {response.status} {response.status_text}. No content fetched.")
                 # Sometimes we still have a DOM even on non-2xx; try reading it for link extraction.
                 try:
                     dom_html = await page.content()
                     if dom_html and dom_html.strip():
-                        return dom_html, response.status, "playwright_non_ok_dom"
+                        return dom_html, response.status, "playwright_non_ok_dom", httpx_attempted, httpx_result
                 except Exception:
                     pass
                 # Try httpx fallback for non-404 errors (403/500/etc can still have HTML with phone numbers)
                 if response.status != 404:
-                    fb_html, fb_status = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+                    httpx_attempted = True
+                    fb_html, fb_status, fb_result = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+                    httpx_result = fb_result
                     if fb_html:
-                        return fb_html, fb_status or response.status, "httpx_fallback"
-                return None, response.status, "playwright_non_ok"
+                        return fb_html, fb_status or response.status, "httpx_fallback", httpx_attempted, httpx_result
+                return None, response.status, "playwright_non_ok", httpx_attempted, httpx_result
         else:
             logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Failed to get a response object for {url}. Navigation might have failed silently.")
-            fb_html, fb_status = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+            httpx_attempted = True
+            fb_html, fb_status, fb_result = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+            httpx_result = fb_result
             if fb_html:
-                return fb_html, fb_status, "httpx_fallback"
-            return None, None, "playwright_no_response"
+                return fb_html, fb_status, "httpx_fallback", httpx_attempted, httpx_result
+            return None, None, "playwright_no_response", httpx_attempted, httpx_result
     except PlaywrightTimeoutError:
         logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Playwright navigation timeout for {url} after {config_instance.default_navigation_timeout / 1000}s.")
-        fb_html, fb_status = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+        httpx_attempted = True
+        fb_html, fb_status, fb_result = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+        httpx_result = fb_result
         if fb_html:
-            return fb_html, fb_status, "httpx_fallback"
-        return None, -1, "playwright_timeout" # Specific code for timeout
+            return fb_html, fb_status, "httpx_fallback", httpx_attempted, httpx_result
+        return None, -1, "playwright_timeout", httpx_attempted, httpx_result # Specific code for timeout
     except PlaywrightError as e:
         error_message = str(e)
         logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Playwright error during navigation to {url}: {error_message}")
-        fb_html, fb_status = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+        httpx_attempted = True
+        fb_html, fb_status, fb_result = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+        httpx_result = fb_result
         if fb_html:
-            return fb_html, fb_status, "httpx_fallback"
-        if "net::ERR_NAME_NOT_RESOLVED" in error_message: return None, -2, "playwright_dns" # DNS error
-        elif "net::ERR_CONNECTION_REFUSED" in error_message: return None, -3, "playwright_conn_refused" # Connection refused
-        elif "net::ERR_ABORTED" in error_message: return None, -6, "playwright_aborted" # Request aborted, often due to navigation elsewhere
-        return None, -4, "playwright_error" # Other Playwright error
+            return fb_html, fb_status, "httpx_fallback", httpx_attempted, httpx_result
+        if "net::ERR_NAME_NOT_RESOLVED" in error_message: return None, -2, "playwright_dns", httpx_attempted, httpx_result # DNS error
+        elif "net::ERR_CONNECTION_REFUSED" in error_message: return None, -3, "playwright_conn_refused", httpx_attempted, httpx_result # Connection refused
+        elif "net::ERR_ABORTED" in error_message: return None, -6, "playwright_aborted", httpx_attempted, httpx_result # Request aborted, often due to navigation elsewhere
+        return None, -4, "playwright_error", httpx_attempted, httpx_result # Other Playwright error
     except Exception as e:
         logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Unexpected error fetching page {url}: {type(e).__name__} - {e}", exc_info=True)
-        fb_html, fb_status = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+        httpx_attempted = True
+        fb_html, fb_status, fb_result = await _fetch_html_via_httpx(url, input_row_id, company_name_or_id)
+        httpx_result = fb_result
         if fb_html:
-            return fb_html, fb_status, "httpx_fallback"
-        return None, -5, "playwright_exception" # Generic exception
+            return fb_html, fb_status, "httpx_fallback", httpx_attempted, httpx_result
+        return None, -5, "playwright_exception", httpx_attempted, httpx_result # Generic exception
 
 def extract_text_from_html(html_content: str) -> str:
     if not html_content: return ""
@@ -406,7 +441,7 @@ async def _perform_scrape_for_entry_point(
     company_name_or_id: str,
     globally_processed_urls: Set[str], # Shared across all entry point attempts for the original given_url
     input_row_id: Any
-) -> Tuple[List[Tuple[str, str, str]], str, Optional[str]]:
+) -> Tuple[List[Tuple[str, str, str]], str, Optional[str], Dict[str, Any]]:
     """
     Core scraping logic for a single entry point URL and its children.
     This function contains the main `while urls_to_scrape` loop.
@@ -441,6 +476,10 @@ async def _perform_scrape_for_entry_point(
     
     entry_point_status_code: Optional[int] = None # To store status of the entry point itself
 
+    httpx_attempted_any = False
+    httpx_used_any = False
+    httpx_last_result: Optional[str] = None
+
     try:
         while urls_to_scrape_q:
             urls_to_scrape_q.sort(key=lambda x: (-x[2], x[1]))
@@ -459,7 +498,15 @@ async def _perform_scrape_for_entry_point(
                     logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}, Entry: {entry_url_to_process}] Page limit reached, but processing high-priority '{current_url_from_queue}'.")
 
 
-            html_content, status_code_fetch, fetch_method = await fetch_page_content(page, current_url_from_queue, input_row_id, company_name_or_id)
+            html_content, status_code_fetch, fetch_method, httpx_attempted, httpx_result = await fetch_page_content(
+                page, current_url_from_queue, input_row_id, company_name_or_id
+            )
+            if httpx_attempted:
+                httpx_attempted_any = True
+                httpx_last_result = httpx_result
+            if fetch_method == "httpx_fallback" and html_content:
+                httpx_used_any = True
+                httpx_last_result = httpx_result or "success"
             
             if current_url_from_queue == entry_url_to_process and current_depth == 0: # This is the fetch for the entry point itself
                 entry_point_status_code = status_code_fetch
@@ -537,13 +584,21 @@ async def _perform_scrape_for_entry_point(
                     
                     logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Critical failure on entry point '{entry_url_to_process}'. Scraper status: {http_status_report}.")
                     await page.close()
-                    return [], http_status_report, None # No canonical URL if entry point fails critically
+                    return [], http_status_report, None, {
+                        "attempted": httpx_attempted_any,
+                        "used": httpx_used_any,
+                        "result": httpx_last_result or ("success" if httpx_used_any else "not_attempted")
+                    } # No canonical URL if entry point fails critically
         
         # After loop for this entry point
         await page.close()
         if scraped_page_details_for_this_entry:
             logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}, Entry: {entry_url_to_process}] Successfully scraped {len(scraped_page_details_for_this_entry)} pages.")
-            return scraped_page_details_for_this_entry, "Success", final_canonical_entry_url_for_this_attempt
+            return scraped_page_details_for_this_entry, "Success", final_canonical_entry_url_for_this_attempt, {
+                "attempted": httpx_attempted_any,
+                "used": httpx_used_any,
+                "result": httpx_last_result or ("success" if httpx_used_any else "not_attempted")
+            }
         else: # No pages scraped for this entry point
             final_status_for_this_entry = "NoContentScraped_Overall"
             if entry_point_status_code is not None: # If the entry point itself had a specific failure status
@@ -553,11 +608,19 @@ async def _perform_scrape_for_entry_point(
                  else: final_status_for_this_entry = "UnknownScrapeErrorCode"
 
             logger.warning(f"[RowID: {input_row_id}, Company: {company_name_or_id}, Entry: {entry_url_to_process}] No content scraped. Final status for this entry: {final_status_for_this_entry}")
-            return [], final_status_for_this_entry, final_canonical_entry_url_for_this_attempt # Return canonical if it was set by a successful landing, even if no sub-pages
+            return [], final_status_for_this_entry, final_canonical_entry_url_for_this_attempt, {
+                "attempted": httpx_attempted_any,
+                "used": httpx_used_any,
+                "result": httpx_last_result or ("success" if httpx_used_any else "not_attempted")
+            } # Return canonical if it was set by a successful landing, even if no sub-pages
     except Exception as e_entry_scrape:
         logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}, Entry: {entry_url_to_process}] General error during scraping process: {type(e_entry_scrape).__name__} - {e_entry_scrape}", exc_info=True)
         if page.is_closed() == False : await page.close()
-        return [], f"GeneralScrapingError_{type(e_entry_scrape).__name__}", final_canonical_entry_url_for_this_attempt
+        return [], f"GeneralScrapingError_{type(e_entry_scrape).__name__}", final_canonical_entry_url_for_this_attempt, {
+            "attempted": httpx_attempted_any,
+            "used": httpx_used_any,
+            "result": httpx_last_result or ("success" if httpx_used_any else "not_attempted")
+        }
 
 
 async def scrape_website(
@@ -566,7 +629,7 @@ async def scrape_website(
     company_name_or_id: str,
     globally_processed_urls: Set[str],
     input_row_id: Any
-) -> Tuple[List[Tuple[str, str, str]], str, Optional[str]]:
+) -> Tuple[List[Tuple[str, str, str]], str, Optional[str], Dict[str, Any]]:
     start_time = time.time()
     logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Starting scrape_website for original URL: {given_url}")
 
@@ -575,12 +638,12 @@ async def scrape_website(
 
     if not normalized_given_url or not normalized_given_url.startswith(('http://', 'https://')):
         logger.warning(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Invalid URL after normalization: {normalized_given_url}")
-        return [], "InvalidURL", None
+        return [], "InvalidURL", None, {"attempted": False, "used": False, "result": "not_attempted_invalid_url"}
 
     # Initial robots.txt check for the very first normalized URL
     async with httpx.AsyncClient(follow_redirects=True, verify=False) as http_client:
         if not await is_allowed_by_robots(normalized_given_url, http_client, input_row_id, company_name_or_id):
-            return [], "RobotsDisallowed", None
+            return [], "RobotsDisallowed", None, {"attempted": False, "used": False, "result": "not_attempted_robots_disallowed"}
     
     # Prepare directories once
     base_scraped_content_dir = os.path.join(output_dir_for_run, config_instance.scraped_content_subdir)
@@ -594,6 +657,9 @@ async def scrape_website(
     attempted_entry_candidates_this_call: Set[str] = {normalized_given_url}
     
     last_dns_error_status = "DNSError_AllFallbacksExhausted" # Default if all fallbacks lead to DNS errors
+    aggregated_httpx_attempted = False
+    aggregated_httpx_used = False
+    aggregated_httpx_last_result: Optional[str] = None
 
     async with async_playwright() as p:
         browser = None
@@ -616,15 +682,29 @@ async def scrape_website(
                 
                 logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Trying entry point: {current_entry_url_to_attempt}")
 
-                details, status, canonical_landed = await _perform_scrape_for_entry_point(
+                details, status, canonical_landed, httpx_meta = await _perform_scrape_for_entry_point(
                     current_entry_url_to_attempt, playwright_context, output_dir_for_run,
                     company_name_or_id, globally_processed_urls, input_row_id
                 )
 
+                try:
+                    if isinstance(httpx_meta, dict):
+                        aggregated_httpx_attempted = aggregated_httpx_attempted or bool(httpx_meta.get("attempted"))
+                        aggregated_httpx_used = aggregated_httpx_used or bool(httpx_meta.get("used"))
+                        if httpx_meta.get("result"):
+                            aggregated_httpx_last_result = str(httpx_meta.get("result"))
+                except Exception:
+                    pass
+
                 if status != "DNSError": # Any success or non-DNS error is final for this given_url
                     logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Entry point {current_entry_url_to_attempt} resulted in non-DNS status: {status}. Finalizing.")
                     if browser.is_connected(): await browser.close()
-                    return details, status, canonical_landed
+                    # Prefer aggregated meta (covers multiple entry attempts); fall back to the current attempt's meta.
+                    return details, status, canonical_landed, {
+                        "attempted": aggregated_httpx_attempted,
+                        "used": aggregated_httpx_used,
+                        "result": aggregated_httpx_last_result or ("success" if aggregated_httpx_used else "not_attempted")
+                    }
                 
                 # It was a DNSError for current_entry_url_to_attempt
                 last_dns_error_status = status # Store the most recent DNS error type
@@ -678,12 +758,16 @@ async def scrape_website(
             # If queue is exhausted
             if browser and browser.is_connected(): await browser.close()
             logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] All entry point attempts, including DNS fallbacks, exhausted for original URL: {given_url}. Last DNS status: {last_dns_error_status}")
-            return [], last_dns_error_status, None
+            return [], last_dns_error_status, None, {
+                "attempted": aggregated_httpx_attempted,
+                "used": aggregated_httpx_used,
+                "result": aggregated_httpx_last_result or ("success" if aggregated_httpx_used else "not_attempted_dns_error")
+            }
 
         except Exception as e_outer:
             logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Outer error in scrape_website for '{given_url}': {type(e_outer).__name__} - {e_outer}", exc_info=True)
             if browser and browser.is_connected(): await browser.close()
-            return [], f"OuterScrapingError_{type(e_outer).__name__}", None
+            return [], f"OuterScrapingError_{type(e_outer).__name__}", None, {"attempted": False, "used": False, "result": f"not_attempted_outer_error:{type(e_outer).__name__}"}
         finally:
             if browser and browser.is_connected():
                 logger.debug(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Ensuring browser is closed in scrape_website's final 'finally' block.")
@@ -691,7 +775,7 @@ async def scrape_website(
 
     # Fallback if Playwright setup itself failed before entering the async with block
     logger.error(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Scrape_website ended, possibly due to Playwright launch failure for '{given_url}'.")
-    return [], "ScraperSetupFailure_Outer", None
+    return [], "ScraperSetupFailure_Outer", None, {"attempted": False, "used": False, "result": "not_attempted_scraper_setup_failure"}
 
 # TODO: [FutureEnhancement] The _test_scraper function below was for demonstrating and testing
 # the scrape_website functionality directly. It includes setup for logging and test output.
@@ -736,7 +820,7 @@ async def _test_scraper():
     globally_processed_urls_for_test: Set[str] = set()
 
     # Adjust to expect three values from scrape_website
-    scraped_items_with_type, status, canonical_url = await scrape_website(
+    scraped_items_with_type, status, canonical_url, httpx_meta = await scrape_website(
        test_url,
        test_run_output_dir, # This is the base for the run, scrape_website will make subdirs
        "example_company_test",

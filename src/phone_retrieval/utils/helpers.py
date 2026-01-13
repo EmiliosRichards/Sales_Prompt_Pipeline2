@@ -177,6 +177,9 @@ def initialize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     df_length = len(df)
     required_cols: Dict[str, Any] = {
         'ScrapingStatus': '', 
+        'HttpFallbackAttempted': None,
+        'HttpFallbackUsed': None,
+        'HttpFallbackResult': None,
         'RegexCandidateSnippets': lambda: [[] for _ in range(df_length)],
         'BestMatchedPhoneNumbers': lambda: [[] for _ in range(df_length)], 
         'OtherRelevantNumbers': lambda: [[] for _ in range(df_length)],

@@ -125,9 +125,10 @@ def execute_pipeline_flow(
             scraped_pages_details: List[Tuple[str, str, str]]
             scraper_status: str
             
-            # scrape_website returns: (List[Tuple[str, str, str]], str, Optional[str])
-            # scraped_pages_details, scraper_status, final_canonical_entry_url_from_scraper
-            scraped_pages_details, scraper_status, final_canonical_entry_url = asyncio.run(
+            # scrape_website returns:
+            # (List[Tuple[str, str, str]], str, Optional[str], Dict[str, Any])
+            # scraped_pages_details, scraper_status, final_canonical_entry_url_from_scraper, httpx_fallback_meta
+            scraped_pages_details, scraper_status, final_canonical_entry_url, httpx_fallback_meta = asyncio.run(
                 scrape_website(processed_url, run_output_dir, company_name, globally_processed_urls, index) # Pass app_config
             )
             run_metrics["tasks"].setdefault("scrape_website_total_duration_seconds", 0)
@@ -138,18 +139,24 @@ def execute_pipeline_flow(
             df.at[index, 'CanonicalEntryURL'] = true_base_domain_for_row # This is the true_base
             current_row_scraper_status = scraper_status
 
-            # --- Instrumentation: did we use httpx fallback at least once for this row? ---
-            # The scraper marks fallback-sourced cleaned files with "__httpx_cleaned.txt".
+            # --- Instrumentation: httpx fallback attempted/used/result for this row ---
             try:
+                if "HttpFallbackAttempted" not in df.columns:
+                    df["HttpFallbackAttempted"] = None
                 if "HttpFallbackUsed" not in df.columns:
                     df["HttpFallbackUsed"] = None
-                used_httpx = False
-                if scraped_pages_details:
-                    for page_file, _, _ in scraped_pages_details:
-                        if isinstance(page_file, str) and "__httpx_cleaned.txt" in page_file:
-                            used_httpx = True
-                            break
+                if "HttpFallbackResult" not in df.columns:
+                    df["HttpFallbackResult"] = None
+
+                attempted_httpx = bool(httpx_fallback_meta.get("attempted")) if isinstance(httpx_fallback_meta, dict) else False
+                used_httpx = bool(httpx_fallback_meta.get("used")) if isinstance(httpx_fallback_meta, dict) else False
+                result_httpx = None
+                if isinstance(httpx_fallback_meta, dict) and httpx_fallback_meta.get("result") is not None:
+                    result_httpx = str(httpx_fallback_meta.get("result"))
+
+                df.at[index, "HttpFallbackAttempted"] = "Yes" if attempted_httpx else "No"
                 df.at[index, "HttpFallbackUsed"] = "Yes" if used_httpx else "No"
+                df.at[index, "HttpFallbackResult"] = result_httpx or ("success" if used_httpx else ("not_attempted" if not attempted_httpx else "failed_unknown"))
             except Exception:
                 pass
 
