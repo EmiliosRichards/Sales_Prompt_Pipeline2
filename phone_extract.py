@@ -462,8 +462,39 @@ def main() -> None:
             worker_outputs.append(out_path)
 
     # Merge outputs into a single CSV under the master run dir
+    # IMPORTANT: preserve the original row order. Worker outputs must be concatenated in chunk order
+    # (by the start row of each chunk), not lexicographic path order (e.g. w10 < w2).
+    worker_outputs_with_start: List[Tuple[int, str]] = []
+    for p in worker_outputs:
+        # We can recover the associated WorkerJob by matching on the output path; to avoid brittle matching,
+        # derive the worker id from the path and map it back to the chunk start.
+        worker_outputs_with_start.append((10**9, p))
+    # Build a map run_id -> start row for stable ordering
+    run_id_to_start: dict = {}
+    for job in jobs:
+        try:
+            start_1based, _ = _parse_range_bounds(job.row_range or "", total_rows=total_rows)
+            run_id_to_start[job.run_id] = start_1based
+        except Exception:
+            run_id_to_start[job.run_id] = 10**9
+
+    def _extract_worker_run_id(path_str: str) -> str:
+        # Expected: .../workers/<run_id>/phone_extraction_results_<run_id>.csv
+        base = os.path.basename(path_str)
+        # Prefer parsing from filename first:
+        if base.startswith("phone_extraction_results_") and base.endswith(".csv"):
+            return base[len("phone_extraction_results_"):-len(".csv")]
+        # Fallback: parent directory name
+        return os.path.basename(os.path.dirname(path_str))
+
+    worker_outputs_with_start = []
+    for p in worker_outputs:
+        rid = _extract_worker_run_id(p)
+        worker_outputs_with_start.append((int(run_id_to_start.get(rid, 10**9)), p))
+
+    worker_paths_sorted = [p for _, p in sorted(worker_outputs_with_start, key=lambda t: t[0])]
     merged_df = pd.concat(
-        [pd.read_csv(p, dtype=str, keep_default_na=False, na_filter=False) for p in sorted(worker_outputs)],
+        [pd.read_csv(p, dtype=str, keep_default_na=False, na_filter=False) for p in worker_paths_sorted],
         ignore_index=True
     )
     merged_output_path = args.output_file.strip() if args.output_file else os.path.join(
