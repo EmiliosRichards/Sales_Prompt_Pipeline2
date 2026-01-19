@@ -1,8 +1,12 @@
 """
 Wrapper for the phone number retrieval pipeline.
+
+This wrapper is used by the full pipeline to run phone retrieval for a single URL.
 """
 import asyncio
 import logging
+import os
+import tempfile
 from typing import List, Optional, Tuple
 
 from src.core.config import AppConfig
@@ -12,7 +16,14 @@ from src.phone_retrieval.processing.pipeline_flow import execute_pipeline_flow
 
 logger = logging.getLogger(__name__)
 
-def retrieve_phone_numbers_for_url(url: str, company_name: str, app_config: AppConfig) -> Tuple[Optional[List[ConsolidatedPhoneNumber]], str]:
+def retrieve_phone_numbers_for_url(
+    url: str,
+    company_name: str,
+    app_config: AppConfig,
+    run_output_dir: Optional[str] = None,
+    llm_context_dir: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Tuple[Optional[List[ConsolidatedPhoneNumber]], str]:
     """
     Retrieves phone numbers for a given URL by running a simplified, in-memory version
     of the phone retrieval pipeline.
@@ -42,6 +53,14 @@ def retrieve_phone_numbers_for_url(url: str, company_name: str, app_config: AppC
     class MockWriter:
         def writerow(self, row):
             pass
+
+    # Default to a temp folder if the full pipeline didn't pass run directories.
+    # This must be Windows-safe (no hardcoded /tmp).
+    base_out = run_output_dir or os.path.join(tempfile.gettempdir(), "sales_prompt_pipeline_phone_retrieval")
+    base_ctx = llm_context_dir or os.path.join(base_out, "llm_context")
+    os.makedirs(base_out, exist_ok=True)
+    os.makedirs(base_ctx, exist_ok=True)
+    effective_run_id = run_id or "temp_run"
 
     # Execute the core pipeline flow from the phone_retrieval module
     try:
@@ -75,9 +94,9 @@ def retrieve_phone_numbers_for_url(url: str, company_name: str, app_config: AppC
             df=df,
             app_config=app_config,
             llm_extractor=llm_extractor,
-            run_output_dir="/tmp/phone_retrieval",
-            llm_context_dir="/tmp/phone_retrieval",
-            run_id="temp_run",
+            run_output_dir=base_out,
+            llm_context_dir=base_ctx,
+            run_id=effective_run_id,
             failure_writer=MockWriter(),
             run_metrics=run_metrics,
             original_phone_col_name_for_profile=None

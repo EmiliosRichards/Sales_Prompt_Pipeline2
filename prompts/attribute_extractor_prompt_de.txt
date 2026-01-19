@@ -1,0 +1,82 @@
+Erst intern Schritt für Schritt denken. Danach gib NUR das finale JSON aus.
+
+Deine Aufgabe: Analysiere den bereitgestellten [Website Summary Text] und extrahiere **detaillierte Unternehmensattribute**. Alle frei-formatierten Textfelder und Listeninhalte sollen **auf Deutsch** sein (sofern sinnvoll).
+
+WICHTIG:
+- Antworte ausschließlich mit **einem** validen JSON-Objekt (keine Erklärungen, kein Markdown).
+- Gib **genau** die unten aufgeführten Felder aus. Keine zusätzlichen Felder.
+- Wenn etwas nicht sicher ableitbar ist: nutze `null` (für optionale Strings/Booleans) bzw. `[]` (für Listen) und keine Vermutungen.
+
+Zu extrahierende Felder:
+
+- `input_summary_url`: "[PROGRAMMATIC_PLACEHOLDER]" (wird programmgesteuert gesetzt; nicht erfinden)
+- `b2b_indicator`: true / false / null
+- `phone_outreach_suitability`: true / false / null
+- `target_group_size_assessment`: string oder null — **auf Deutsch** (z. B. "Wirkt klein", "Wirkt mittelgroß", "Wirkt groß (>=500 potenziell)", "Unklar")
+- `industry`: string oder null — **auf Deutsch**
+- `products_services_offered`: Liste von Strings — **auf Deutsch**
+- `usp_key_selling_points`: Liste von Strings — **auf Deutsch**
+- `customer_target_segments`: Liste von Strings — **auf Deutsch**
+- `business_model`: string oder null — **auf Deutsch**
+- `company_size_indicators_text`: string oder null — **auf Deutsch** (kurzes Zitat/Indiz aus dem Summary, falls vorhanden)
+- `company_size_category_inferred`: string oder null — **auf Deutsch** (z. B. "Startup", "KMU", "Großunternehmen", "Unklar")
+- `innovation_level_indicators_text`: string oder null — **auf Deutsch**
+- `website_clarity_notes`: string oder null — **auf Deutsch**
+
+Output (genau dieses Schema):
+{
+  "input_summary_url": "[PROGRAMMATIC_PLACEHOLDER]",
+  "b2b_indicator": null,
+  "phone_outreach_suitability": null,
+  "target_group_size_assessment": null,
+  "industry": null,
+  "products_services_offered": [],
+  "usp_key_selling_points": [],
+  "customer_target_segments": [],
+  "business_model": null,
+  "company_size_indicators_text": null,
+  "company_size_category_inferred": null,
+  "innovation_level_indicators_text": null,
+  "website_clarity_notes": null
+}
+
+--------WEBSITE SUMMARY TEXT------------
+{{WEBSITE_SUMMARY_TEXT_PLACEHOLDER}}
+-----------END OF TEXT-----------------
+
+---
+HIGH-QUALITY EXAMPLE - DO NOT ALTER
+---
+
+--------WEBSITE SUMMARY TEXT------------
+Innovatech GmbH ist ein deutsches Softwareunternehmen (gegründet 2010), das maßgeschneiderte Softwarelösungen für die Logistikbranche anbietet. Der Fokus liegt auf der Digitalisierung und Optimierung von Lieferketten für mittelständische bis große Unternehmen, insbesondere in der DACH-Region. Zu den Kernleistungen zählen das cloudbasierte Warehouse-Management-System „LogiCloud“ (SaaS, u. a. mit Echtzeit-Tracking und ERP-Integration), die KI-gestützte Routenoptimierung „RouteMax“ sowie strategische Beratungsleistungen zur Prozessoptimierung und Technologieeinführung.
+-----------END OF TEXT-----------------
+
+--------EXPECTED JSON RESPONSE------------
+{
+  "input_summary_url": "https://www.innovatech-gmbh.de",
+  "b2b_indicator": true,
+  "phone_outreach_suitability": true,
+  "target_group_size_assessment": "Wirkt groß (>=500 potenziell)",
+  "industry": "Logistik-Software / Supply-Chain-Software",
+  "products_services_offered": [
+    "Cloudbasiertes Warehouse-Management-System (WMS) „LogiCloud“ (SaaS, Echtzeit-Tracking, ERP-Integration)",
+    "KI-gestützte Routenoptimierung „RouteMax“",
+    "Strategische Beratung zur Optimierung von Logistikprozessen und zur Implementierung neuer Technologien"
+  ],
+  "usp_key_selling_points": [
+    "Spezialisierung auf die Logistikbranche",
+    "Kombination aus SaaS-Produkt und Beratungsleistung",
+    "KI-basierte Optimierung zur Effizienzsteigerung"
+  ],
+  "customer_target_segments": [
+    "Mittelständische Unternehmen",
+    "Große Unternehmen",
+    "Unternehmen in der DACH-Region mit Logistik-/Supply-Chain-Prozessen"
+  ],
+  "business_model": "SaaS-Produkt (Software-as-a-Service) kombiniert mit projektbezogener Beratung",
+  "company_size_indicators_text": "„Fokus … für mittelständische bis große Unternehmen, insbesondere in der DACH-Region“",
+  "company_size_category_inferred": "KMU",
+  "innovation_level_indicators_text": "KI-gestützte Routenoptimierung wird explizit erwähnt („KI-gestützte Routenoptimierung“).",
+  "website_clarity_notes": "Leistungen, Zielgruppe und Nutzen werden im Summary klar beschrieben (Produkte, Branchenfokus, Region)."
+}

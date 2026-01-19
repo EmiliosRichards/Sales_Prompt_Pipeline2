@@ -1,0 +1,49 @@
+Erst intern Schritt für Schritt denken und den Text verstehen. Dann gib NUR das finale JSON aus.
+
+Deine Aufgabe: Du erhältst den bereinigten Website-Text (aus mehreren Seiten). Erstelle daraus eine **aussagekräftige, aber kompakte Zusammenfassung auf Deutsch**, die als Grundlage für nachgelagerte Attribut-Extraktion dient.
+
+WICHTIG:
+- Antworte ausschließlich mit **einem** validen JSON-Objekt (keine Erklärungen, kein Markdown).
+- Die JSON-Struktur muss exakt diese Felder enthalten:
+  - `original_url`: Platzhalter (wird programmgesteuert gesetzt; du darfst ihn nicht erfinden, aber falls er im Beispiel vorkommt, übernimm ihn).
+  - `summary`: Zusammenfassung **auf Deutsch** (max. ca. 600 Wörter).
+  - `extracted_company_name_from_summary`: exakter Firmenname, falls klar erkennbar, sonst `null`.
+- Nutze klare, sachliche Sprache. Keine Marketing-Floskeln.
+
+JSON Output Structure:
+{
+  "original_url": "[Placeholder for the original URL - this will be filled programmatically, do not generate it]",
+  "summary": "…",
+  "extracted_company_name_from_summary": "…" 
+}
+
+Wenn der Firmenname nicht sicher ist: `extracted_company_name_from_summary` = null.
+
+--------SCRAPED WEBSITE TEXT------------
+{{SCRAPED_WEBSITE_TEXT_PLACEHOLDER}}
+-----------END OF TEXT-------------------
+
+---
+HIGH-QUALITY EXAMPLE - DO NOT ALTER
+---
+
+--------SCRAPED WEBSITE TEXT------------
+Innovatech GmbH - Wir optimieren Ihre Logistik.
+
+Über Uns:
+Innovatech GmbH ist ein führender Anbieter von maßgeschneiderten Softwarelösungen für die Logistikbranche. Seit 2010 helfen wir Unternehmen dabei, ihre Lieferketten zu digitalisieren und zu optimieren. Unser Team arbeitet eng mit unseren Kunden zusammen, um effiziente Lösungen zu schaffen. Wir bedienen vor allem mittelständische und große Unternehmen in der DACH-Region.
+
+Produkte & Services:
+- Warehouse Management System (WMS): Cloud-basiertes WMS "LogiCloud" mit Echtzeit-Tracking, Bestandsmanagement und Berichterstattung; SaaS; ERP-Integration.
+- Routenoptimierung: "RouteMax" nutzt KI-Algorithmen zur Planung effizienter Lieferrouten und zur Senkung des Kraftstoffverbrauchs.
+- Consulting: Strategische Beratung zur Optimierung von Logistikprozessen und zur Implementierung neuer Technologien.
+
+Mission: Logistik durch intelligente Software nachhaltiger und effizienter gestalten.
+-----------END OF TEXT-------------------
+
+--------EXPECTED JSON RESPONSE------------
+{
+  "original_url": "https://www.innovatech-gmbh.de",
+  "summary": "Innovatech GmbH ist ein deutsches Softwareunternehmen (gegründet 2010), das maßgeschneiderte Softwarelösungen für die Logistikbranche anbietet. Der Fokus liegt auf der Digitalisierung und Optimierung von Lieferketten für mittelständische bis große Unternehmen, insbesondere in der DACH-Region. Zu den Kernleistungen zählen das cloudbasierte Warehouse-Management-System „LogiCloud“ (SaaS, u. a. mit Echtzeit-Tracking und ERP-Integration), die KI-gestützte Routenoptimierung „RouteMax“ sowie strategische Beratungsleistungen zur Prozessoptimierung und Technologieeinführung. Als Ziel wird genannt, Logistik durch intelligente Software nachhaltiger und effizienter zu machen.",
+  "extracted_company_name_from_summary": "Innovatech GmbH"
+}
