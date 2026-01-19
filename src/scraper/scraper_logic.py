@@ -31,6 +31,95 @@ config_instance = AppConfig()
 logger = logging.getLogger(__name__)
 
 
+def _try_load_cached_summary_text(normalized_url: str) -> Optional[str]:
+    """
+    Attempt to reconstruct the "collected summary text" from existing cleaned scrape artifacts
+    in one or more scraped-content cache directories.
+
+    Cache directory format expected (same as both scrapers write):
+      <scraped_content_root>/<domain_dir>/*.txt  (files end with _cleaned.txt)
+
+    Where <domain_dir> is derived from the URL host with:
+      - strip leading www.
+      - replace non [\\w.-] with '_'
+      - truncate to 50 chars (same as scraper)
+
+    Returns:
+      A single combined text blob (possibly truncated), or None if not found.
+    """
+    try:
+        if not getattr(config_instance, "reuse_scraped_content_if_available", False):
+            return None
+        cache_dirs = getattr(config_instance, "scraped_content_cache_dirs", None) or []
+        if not cache_dirs:
+            return None
+
+        parsed = urlparse(normalized_url)
+        host = parsed.netloc or ""
+        # Strip userinfo/port if present
+        host = host.split("@")[-1].split(":")[0]
+        host = re.sub(r"^www\.", "", host)
+        if not host:
+            return None
+
+        safe_source_name = re.sub(r"[^\w.-]", "_", host)[:50]
+        min_chars = int(getattr(config_instance, "scraped_content_cache_min_chars", 500) or 500)
+        max_chars = int(getattr(config_instance, "LLM_MAX_INPUT_CHARS_FOR_SUMMARY", 40000) or 40000)
+
+        # Gather candidate cleaned.txt files across all cache dirs
+        candidates: List[str] = []
+        for root in cache_dirs:
+            root = os.path.normpath(root)
+            domain_dir = os.path.join(root, safe_source_name)
+            if not os.path.isdir(domain_dir):
+                continue
+            try:
+                for fname in os.listdir(domain_dir):
+                    if not fname.endswith("_cleaned.txt"):
+                        continue
+                    candidates.append(os.path.join(domain_dir, fname))
+            except Exception:
+                continue
+
+        if not candidates:
+            return None
+
+        # Prefer newest files first (most likely to include the best landing pages).
+        try:
+            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        except Exception:
+            pass
+
+        chunks: List[str] = []
+        total = 0
+        for fp in candidates:
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    txt = f.read()
+                if not txt or not txt.strip():
+                    continue
+                # Limit per-file to avoid huge single files
+                txt = txt.strip()
+                remaining = max_chars - total
+                if remaining <= 0:
+                    break
+                if len(txt) > remaining:
+                    txt = txt[:remaining]
+                chunks.append(txt)
+                total += len(txt)
+                if total >= max_chars:
+                    break
+            except Exception:
+                continue
+
+        combined = "\n\n".join(chunks).strip()
+        if len(combined) >= min_chars:
+            return combined[:max_chars]
+        return None
+    except Exception:
+        return None
+
+
 async def is_allowed_by_robots(url: str, client: httpx.AsyncClient, input_row_id: Any, company_name_or_id: str) -> bool:
     if not config_instance.respect_robots_txt:
         logger.debug(f"[RowID: {input_row_id}, Company: {company_name_or_id}] robots.txt check is disabled.")
@@ -300,6 +389,17 @@ async def scrape_website(
     if not normalized_given_url or not normalized_given_url.startswith(('http://', 'https://')):
         logger.warning(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Invalid URL after normalization: {normalized_given_url}")
         return [], "InvalidURL", None, None # Added None for summary text
+
+    # --- Reuse existing cleaned scrape artifacts (skip network scraping) ---
+    cached_text = _try_load_cached_summary_text(normalized_given_url)
+    if cached_text:
+        try:
+            globally_processed_urls.add(normalized_given_url)
+        except Exception:
+            pass
+        logger.info(f"{log_identifier} Reusing cached scraped content (cleaned.txt) instead of re-scraping.")
+        # Treat as success; canonical URL may not be recoverable from filenames, so use normalized input.
+        return [], "Success_CacheHit", normalized_given_url, cached_text
 
     # Initial robots.txt check for the very first normalized URL
     async with httpx.AsyncClient(follow_redirects=True, verify=False) as http_client:

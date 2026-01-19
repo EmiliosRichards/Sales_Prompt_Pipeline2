@@ -109,11 +109,19 @@ python main_pipeline.py -i data\final_80k.csv -s demo
 python main_pipeline.py -i data\final_80k.csv -r 1-200 -s batch1
 ```
 
+- **Parallel end-to-end (includes sales pitch generation)**:
+  - One command spawns multiple worker processes and streams results back to the master.
+
+```bash
+python main_pipeline.py -i data\final_80k.csv -r 1-200 -s batch1 --workers 20
+```
+
 #### Useful flags
 - `--input-profile <name>`: override `INPUT_FILE_PROFILE_NAME` at runtime.
 - `--skip-prequalification`: bypass B2B/capacity filtering (runs the rest of the flow).
 - `--pitch-from-description`: skip scraping and build pitch from description fields only.
 - `--force-phone-extraction`: always run phone retrieval even if an input phone exists.
+- `--workers <N>`: run the **full pipeline** in parallel (scrape + summarize + attributes + partner match + sales pitch + optional phone retrieval).
 - `-t/--test`: routes Slack notifications to the test channel (if configured).
 
 #### Recommended mode for phone-first outreach (your described use-case)
@@ -129,16 +137,30 @@ Outputs live under:
 - `output_data/<run_id>/SalesOutreachReport_<run_id>.csv`
 - `output_data/<run_id>/SalesOutreachReport_<run_id>.xlsx`
 - `output_data/<run_id>/SalesOutreachReport_<run_id>_live.csv` (incremental progress)
+- `output_data/<run_id>/SalesOutreachReport_<run_id>_live.jsonl` (incremental progress; one JSON object per processed row)
+- `output_data/<run_id>/SalesOutreachReport_<run_id>_live_status.json` (progress counters: jobs/rows written)
 - `output_data/<run_id>/failed_rows_<run_id>.csv` (row-level failure log)
 - `output_data/<run_id>/run_metrics_<run_id>.md`
 - `output_data/<run_id>/scraped_content/...` (scraped cleaned-text artifacts)
 - `output_data/<run_id>/llm_context/...` and `output_data/<run_id>/llm_requests/...` (LLM prompt/response artifacts)
 
+When running with `--workers > 1`, additional parallel artifacts live under:
+- `output_data/<run_id>/jobs/`
+  - `jobs/jobXXXX/...` (per-slice artifacts + per-job failures)
+  - `jobs/_worker_logs/worker_pid<PID>.log` (per-worker process logs)
+
+#### Monitoring parallel progress
+- Watch counters:
+  - `output_data/<run_id>/SalesOutreachReport_<run_id>_live_status.json`
+- Watch rows as they are produced:
+  - `output_data/<run_id>/SalesOutreachReport_<run_id>_live.csv`
+  - `output_data/<run_id>/SalesOutreachReport_<run_id>_live.jsonl`
+
 ---
 
 ### 4) Configuration: what must be set (and what’s typical)
 
-All configuration is centralized in `src/core/config.py` (`AppConfig`). Both pipelines call `dotenv` loading (`load_dotenv(override=True)` at entrypoints, plus `AppConfig`’s own multi-path `.env` discovery).
+All configuration is centralized in `src/core/config.py` (`AppConfig`). Both pipelines call `dotenv` loading (entrypoints use `load_dotenv(override=False)` so shell env vars can override `.env`, plus `AppConfig`’s own multi-path `.env` discovery).
 
 #### Required
 - **`GEMINI_API_KEY`**: required for all LLM tasks (full pipeline + phone-only classification/validation).

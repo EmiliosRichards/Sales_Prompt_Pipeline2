@@ -245,6 +245,11 @@ def should_attempt_phone_retrieval(phone_number_raw: Optional[str]) -> bool:
     if candidate == "":
         return True
 
+    # Common Excel/text-protect prefix for phone numbers in CSV exports, e.g. "'+49..."
+    # Treat it as formatting noise, not part of the number.
+    if candidate.startswith("'") and len(candidate) > 1:
+        candidate = candidate[1:].strip()
+
     lower = candidate.lower()
     placeholders = {"na", "n/a", "none", "null", "nan", "-", "—", "tbd", "skip", "?", "0"}
     if lower in placeholders:

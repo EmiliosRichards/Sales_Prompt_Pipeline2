@@ -225,6 +225,29 @@ class AppConfig:
             "_original_phone_column_name": "Company Phone"
         }
         ,
+        # For PHONE-ONLY pipeline (phone_extract.py): keep existing phones in GivenPhoneNumber so the
+        # phone retrieval flow can decide whether to re-check/override them.
+        "company_semicolon_phone_extract": {
+            "Company": "CompanyName",
+            "Website": "GivenURL",
+            "Short Description": "Description",
+            "Industry": "Industry",
+            "Company Phone": "GivenPhoneNumber",
+            "_original_phone_column_name": "Company Phone"
+        }
+        ,
+        # For running the full pipeline AFTER phone_extract has produced PhoneNumber_Found.
+        # This maps the enriched phone column into the canonical PhoneNumber field so the full pipeline
+        # can generate pitches without re-running phone retrieval for every row.
+        "company_semicolon_phone_found": {
+            "Company": "CompanyName",
+            "Website": "GivenURL",
+            "Short Description": "Description",
+            "Industry": "Industry",
+            "PhoneNumber_Found": "PhoneNumber",
+            "_original_phone_column_name": "PhoneNumber_Found"
+        }
+        ,
         "pflege_plus_exhibitors": {
             "company_name": "CompanyName",
             "website": "GivenURL",
@@ -490,6 +513,19 @@ class AppConfig:
         self.target_country_codes: List[str] = [code.strip().upper() for code in target_country_codes_str.split(',') if code.strip()]
         self.default_region_code: Optional[str] = os.getenv('DEFAULT_REGION_CODE', 'DE') # Default region for parsing if others fail
         self.force_phone_extraction: bool = os.getenv('FORCE_PHONE_EXTRACTION', 'False').lower() == 'true'
+        # When True, the full pipeline may run phone retrieval (scrape/regex/LLM) if input phone is missing.
+        # For two-stage workflows (phone_extract first, then main_pipeline), you typically want this False.
+        self.enable_phone_retrieval_in_full_pipeline: bool = os.getenv('ENABLE_PHONE_RETRIEVAL_IN_FULL_PIPELINE', 'True').lower() == 'true'
+
+        # --- Scrape Reuse / Cache (for full pipeline scraping) ---
+        # Allows the full pipeline to reuse existing cleaned scrape artifacts (e.g. from phone_extract)
+        # instead of re-scraping websites. This can dramatically speed up "resume" workflows.
+        self.reuse_scraped_content_if_available: bool = os.getenv('REUSE_SCRAPED_CONTENT_IF_AVAILABLE', 'False').lower() == 'true'
+        raw_cache_dirs = os.getenv('SCRAPED_CONTENT_CACHE_DIRS', '') or ''
+        # Accept both comma and semicolon as separators (Windows users often paste ';' lists).
+        raw_cache_dirs = raw_cache_dirs.replace(';', ',')
+        self.scraped_content_cache_dirs: List[str] = [p.strip() for p in raw_cache_dirs.split(',') if p.strip()]
+        self.scraped_content_cache_min_chars: int = int(os.getenv('SCRAPED_CONTENT_CACHE_MIN_CHARS', '500'))
 
         # --- Data Handling & Input Profiling ---
         self.input_excel_file_path: str = input_file_override or os.getenv('INPUT_EXCEL_FILE_PATH', 'data_to_be_inputed.xlsx')  # Relative to project root

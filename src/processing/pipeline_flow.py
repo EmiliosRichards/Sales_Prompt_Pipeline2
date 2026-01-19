@@ -34,6 +34,7 @@ from src.core.schemas import (
 from src.data_handling.consolidator import get_canonical_base_url
 from src.llm_clients.gemini_client import GeminiClient
 from src.scraper import scrape_website
+from src.scraper import scraper_logic as full_scraper_logic
 from src.extractors.llm_tasks.summarize_task import generate_website_summary
 from src.extractors.llm_tasks.extract_attributes_task import extract_detailed_attributes
 from src.extractors.llm_tasks.match_partner_task import match_partner
@@ -43,7 +44,73 @@ from src.utils.helpers import log_row_failure, sanitize_filename_component
 from src.processing.url_processor import process_input_url
 from src.phone_retrieval.retrieval_wrapper import retrieve_phone_numbers_for_url
 from src.utils.helpers import should_attempt_phone_retrieval
+
+
+def _normalize_phone_str(val: Any) -> str:
+    """Normalize phone-like values from pandas cells into a usable string (or '')."""
+    try:
+        if val is None:
+            return ""
+        if isinstance(val, float) and pd.isna(val):
+            return ""
+        s = str(val).strip()
+        if not s or s.lower() in {"nan", "none", "null"}:
+            return ""
+        if s.startswith("'") and len(s) > 1:
+            s = s[1:].strip()
+        return s
+    except Exception:
+        return ""
+
+
+def _pick_first_usable_phone(row: pd.Series, df: pd.DataFrame, col_names: List[str]) -> str:
+    """Return the first phone value that looks usable (or '' if none)."""
+    for col in col_names:
+        if not col:
+            continue
+        if col not in df.columns:
+            continue
+        s = _normalize_phone_str(row.get(col))
+        if s and not should_attempt_phone_retrieval(s):
+            return s
+    return ""
+
+
+def _format_avg_leads_per_day(val: Any) -> Optional[str]:
+    """Format avg leads per day for insertion into sales pitch text."""
+    try:
+        if val is None:
+            return None
+        if isinstance(val, float) and pd.isna(val):
+            return None
+        # Pydantic may coerce strings to float already, but be defensive.
+        if isinstance(val, (int, float)):
+            # Most partners use whole numbers; keep it tidy.
+            return f"{val:.0f}"
+        s = str(val).strip()
+        if not s or s.lower() in {"nan", "none", "null"}:
+            return None
+        try:
+            f = float(s)
+            return f"{f:.0f}"
+        except Exception:
+            return s
+    except Exception:
+        return None
+
+
+def _fill_programmatic_placeholder(pitch: Optional[str], avg_leads_per_day: Any) -> Optional[str]:
+    if not pitch:
+        return pitch
+    marker = "{programmatic placeholder}"
+    if marker not in pitch:
+        return pitch
+    formatted = _format_avg_leads_per_day(avg_leads_per_day)
+    if not formatted:
+        return pitch
+    return pitch.replace(marker, formatted)
 from src.reporting.live_csv_reporter import LiveCsvReporter
+from src.reporting.live_jsonl_reporter import LiveJsonlReporter
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +139,9 @@ def execute_pipeline_flow(
     golden_partner_summaries: List[Dict[str, Any]],
     skip_prequalification: bool = False,
     pitch_from_description: bool = False,
+    live_reporter: Optional[LiveCsvReporter] = None,
+    row_queue: Optional[Any] = None,
+    row_queue_meta: Optional[Dict[str, Any]] = None,
 ) -> PipelineOutput:
     """
     Executes the core data processing flow of the pipeline.
@@ -137,18 +207,46 @@ def execute_pipeline_flow(
     rows_failed_count = 0
 
     # --- Live Reporter Setup ---
-    # Define the header for the live report. This should contain all possible columns.
-    live_report_header = list(df.columns) + [
-        'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status', 'is_b2b', 'serves_1000',
-        'is_b2b_reason', 'serves_1000_reason', 'description', 'Industry',
-        'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
-        'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
-        'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
-        'Target Group Size Assessment', 'sales_pitch', 'matched_golden_partner',
-        'match_reasoning', 'Matched Partner Description', 'Avg Leads Per Day', 'Rank'
-    ]
-    live_report_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.csv")
-    live_reporter = LiveCsvReporter(filepath=live_report_path, header=live_report_header)
+    # In single-process mode, we write a live CSV from inside this function.
+    # In parallel mode, we stream rows to the master via row_queue and the master writes the live CSV/JSONL.
+    augmented_live_reporter: Optional[LiveCsvReporter] = None
+    augmented_jsonl_reporter: Optional[LiveJsonlReporter] = None
+    sales_jsonl_reporter: Optional[LiveJsonlReporter] = None
+
+    if live_reporter is None and row_queue is None:
+        live_report_header = list(df.columns) + [
+            'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status', 'is_b2b', 'serves_1000',
+            'is_b2b_reason', 'serves_1000_reason', 'description', 'Industry',
+            'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
+            'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
+            'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
+            'Target Group Size Assessment', 'sales_pitch', 'matched_golden_partner',
+            'match_reasoning', 'Matched Partner Description', 'Avg Leads Per Day', 'Rank'
+        ]
+        live_report_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.csv")
+        live_reporter = LiveCsvReporter(filepath=live_report_path, header=live_report_header)
+        sales_jsonl_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.jsonl")
+        sales_jsonl_reporter = LiveJsonlReporter(filepath=sales_jsonl_path)
+
+        # Also write an "augmented input" live file (CSV + JSONL) for easy downstream usage.
+        augmented_header = list(df.columns) + [
+            'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status',
+            'description', 'Industry',
+            'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
+            'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
+            'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
+            'Target Group Size Assessment',
+            'matched_golden_partner', 'match_reasoning',
+            'sales_pitch'
+        ]
+        # Deduplicate while preserving order
+        seen_cols = set()
+        augmented_header = [c for c in augmented_header if not (c in seen_cols or seen_cols.add(c))]
+
+        augmented_live_path = os.path.join(run_output_dir, f"input_augmented_{run_id}_live.csv")
+        augmented_jsonl_path = os.path.join(run_output_dir, f"input_augmented_{run_id}_live.jsonl")
+        augmented_live_reporter = LiveCsvReporter(filepath=augmented_live_path, header=augmented_header)
+        augmented_jsonl_reporter = LiveJsonlReporter(filepath=augmented_jsonl_path)
     # --- End Live Reporter Setup ---
 
     # Pre-fetch company name and URL column names from AppConfig
@@ -158,14 +256,35 @@ def execute_pipeline_flow(
     )
     company_name_col_key = active_profile.get('CompanyName', 'CompanyName')
     url_col_key = active_profile.get('GivenURL', 'GivenURL')
+    # NOTE: Profiles are input->canonical maps; by default we operate on canonical columns.
+    # Phone can exist under multiple names depending on which stage produced the file.
     phone_col_key = active_profile.get('PhoneNumber', 'PhoneNumber')
+    original_phone_column_name = None
+    try:
+        original_phone_column_name = active_profile.get('_original_phone_column_name')
+    except Exception:
+        original_phone_column_name = None
 
     for i, (index, row_series) in enumerate(df.iterrows()):
         rows_processed_count += 1
         row: pd.Series = row_series
         company_name_str: str = str(row.get(company_name_col_key, f"MissingCompanyName_Row_{index}"))
         given_url_original: Optional[str] = row.get(url_col_key)
-        phone_number_original: Optional[str] = row.get(phone_col_key)
+        # Prefer "already-found" phone columns first, but also allow raw/original phone columns like "Company Phone".
+        # This ensures we still generate a pitch when a phone exists in another column even if phone extraction found none.
+        candidate_phone_cols: List[str] = [
+            phone_col_key,               # canonical phone for full pipeline
+            "GivenPhoneNumber",          # common canonical for phone-only outputs
+            "PhoneNumber_Found",         # common augmented column from phone_extract
+        ]
+        if original_phone_column_name and original_phone_column_name not in candidate_phone_cols:
+            candidate_phone_cols.append(original_phone_column_name)
+        # Always consider the raw "Company Phone" column if present, even if the profile points elsewhere.
+        if "Company Phone" not in candidate_phone_cols:
+            candidate_phone_cols.append("Company Phone")
+
+        usable_input_phone = _pick_first_usable_phone(row, df, candidate_phone_cols)
+        phone_number_original: Optional[str] = usable_input_phone if usable_input_phone else None
         given_url_original_str: str = str(given_url_original) if given_url_original else "MissingURL"
 
         current_row_number_for_log: int = i + 1  # 1-based for logging
@@ -243,6 +362,12 @@ def execute_pipeline_flow(
 
                 # --- 2. Scrape Website ---
                 logger.info(f"{log_identifier} Starting website scraping for: {processed_url}")
+                # Ensure the scraper module uses this run's AppConfig (it has a module-level config_instance).
+                # This also enables per-run options like reuse_scraped_content_if_available / cache dirs.
+                try:
+                    full_scraper_logic.config_instance = app_config
+                except Exception:
+                    pass
                 _, scraper_status, final_canonical_entry_url, collected_summary_text = asyncio.run(
                     scrape_website(processed_url, run_output_dir, company_name_str, globally_processed_urls, index, run_id)
                 )
@@ -561,7 +686,20 @@ def execute_pipeline_flow(
 
             phone_status = "Not_Processed"
             if not pitch_from_description:
-                if app_config.force_phone_extraction or should_attempt_phone_retrieval(phone_number_original):
+                if not getattr(app_config, "enable_phone_retrieval_in_full_pipeline", True):
+                    # Do not perform phone retrieval within the full pipeline.
+                    # Still treat a usable input phone as the "found_number" so reports are consistent.
+                    if phone_number_original is not None and not should_attempt_phone_retrieval(str(phone_number_original)):
+                        phone_status = "Provided_In_Input"
+                        num = str(phone_number_original).strip()
+                        if num.startswith("'") and len(num) > 1:
+                            num = num[1:].strip()
+                        if num:
+                            df.at[index, 'found_number'] = num
+                    else:
+                        phone_status = "Skipped_Phone_Retrieval"
+                        logger.info(f"{log_identifier} Phone retrieval skipped (ENABLE_PHONE_RETRIEVAL_IN_FULL_PIPELINE=False).")
+                elif app_config.force_phone_extraction or should_attempt_phone_retrieval(phone_number_original):
                     if app_config.force_phone_extraction:
                         logger.info(f"{log_identifier} Force flag enabled. Attempting phone retrieval.")
                     else:
@@ -596,13 +734,39 @@ def execute_pipeline_flow(
                 else:
                     phone_status = "Provided_In_Input"
                     logger.info(f"{log_identifier} Phone number retrieval skipped due to acceptable input value: '{phone_number_original}'")
+                    # Populate found_number from the usable input phone so downstream report columns
+                    # (and pitch gating) have a consistent "number to call" field.
+                    if phone_number_original is not None:
+                        num = str(phone_number_original).strip()
+                        if num.startswith("'") and len(num) > 1:
+                            num = num[1:].strip()
+                        if num:
+                            df.at[index, 'found_number'] = num
             df.at[index, 'PhoneNumber_Status'] = phone_status
 
             # Decide whether we have a usable phone number for outreach (found or usable input fallback).
-            found_number_val = df.at[index, 'found_number'] if 'found_number' in df.columns else None
-            found_number_val = str(found_number_val).strip() if found_number_val is not None else ""
-            input_number_val = str(phone_number_original).strip() if phone_number_original is not None else ""
+            found_number_val_raw = df.at[index, 'found_number'] if 'found_number' in df.columns else None
+            # Pandas may store missing values as NaN floats; treat those as empty.
+            if found_number_val_raw is None or (isinstance(found_number_val_raw, float) and pd.isna(found_number_val_raw)):
+                found_number_val = ""
+            else:
+                found_number_val = str(found_number_val_raw).strip()
+                if found_number_val.lower() in {"nan", "none", "null"}:
+                    found_number_val = ""
+                if found_number_val.startswith("'") and len(found_number_val) > 1:
+                    found_number_val = found_number_val[1:].strip()
+
+            input_number_val = _normalize_phone_str(phone_number_original)
+
             has_phone_for_outreach = bool(found_number_val) or (input_number_val and not should_attempt_phone_retrieval(input_number_val))
+
+            # If we didn't find a phone via retrieval but have a usable phone in the input (incl. Company Phone fallback),
+            # use it for outreach and reporting so downstream is consistent.
+            if not found_number_val and input_number_val and not should_attempt_phone_retrieval(input_number_val):
+                df.at[index, 'found_number'] = input_number_val
+                if phone_status in {"No_Numbers_Found", "No_Main_Line_Found", "Skipped_Phone_Retrieval", "Not_Processed"}:
+                    df.at[index, 'PhoneNumber_Status'] = "Provided_In_Input_CompanyPhone"
+                found_number_val = input_number_val
 
             if not has_phone_for_outreach:
                 # Skip partner matching + sales pitch if we have no phone number to call.
@@ -706,6 +870,15 @@ def execute_pipeline_flow(
                             )
                         else:
                             logger.info(f"{log_identifier} LLM Call 4 (Sales Pitch Generation) successful.")
+                            # Fill the programmatic placeholder with the golden partner's "Avg Leads Per Day"
+                            # so live CSV/JSONL outputs have the final pitch text.
+                            try:
+                                final_match_output.phone_sales_line = _fill_programmatic_placeholder(
+                                    final_match_output.phone_sales_line,
+                                    final_match_output.avg_leads_per_day
+                                )
+                            except Exception:
+                                pass
                             final_match_output.scrape_status = current_row_scraper_status
                             final_match_output.analyzed_company_attributes = detailed_attributes_obj
                             final_match_output.summary = website_summary_obj.summary if website_summary_obj else None
@@ -775,7 +948,30 @@ def execute_pipeline_flow(
                 'Avg Leads Per Day': final_match_output.avg_leads_per_day if final_match_output else None,
                 'Rank': final_match_output.rank if final_match_output else None
             })
-            live_reporter.append_row(final_row_data)
+            # --- Live Reporting ---
+            if live_reporter is not None:
+                live_reporter.append_row(final_row_data)
+            if sales_jsonl_reporter is not None:
+                sales_jsonl_reporter.append_obj(final_row_data)
+            if augmented_live_reporter is not None:
+                augmented_live_reporter.append_row(final_row_data)
+            if augmented_jsonl_reporter is not None:
+                augmented_jsonl_reporter.append_obj(final_row_data)
+
+            if row_queue is not None:
+                payload = dict(final_row_data)
+                if row_queue_meta:
+                    payload.update({f"__meta_{k}": v for k, v in row_queue_meta.items()})
+                try:
+                    row_queue.put({
+                        "type": "row",
+                        "run_id": run_id,
+                        "ts": datetime.now().isoformat(),
+                        "data": payload
+                    })
+                except Exception:
+                    # Queue errors should not kill the worker; best effort only.
+                    pass
             # --- End Live Reporting ---
 
             logger.info(f"{log_identifier} Row {current_row_number_for_log} processing complete.")
@@ -836,6 +1032,28 @@ def execute_pipeline_flow(
                 true_base_scraper_status[true_base] = status
             # If current is non-success, non-error, and new is error, keep current.
             # If both are errors, the last one processed for that true_base will stick.
+
+    # If we wrote an augmented live file in single-process mode, also write a stable final copy
+    # for downstream consumption (mirrors the parallel writer behavior).
+    try:
+        if augmented_live_reporter is not None:
+            import shutil
+            live_path = os.path.join(run_output_dir, f"input_augmented_{run_id}_live.csv")
+            final_path = os.path.join(run_output_dir, f"input_augmented_{run_id}.csv")
+            if os.path.exists(live_path):
+                shutil.copyfile(live_path, final_path)
+            live_jsonl = os.path.join(run_output_dir, f"input_augmented_{run_id}_live.jsonl")
+            final_jsonl = os.path.join(run_output_dir, f"input_augmented_{run_id}.jsonl")
+            if os.path.exists(live_jsonl):
+                shutil.copyfile(live_jsonl, final_jsonl)
+        if sales_jsonl_reporter is not None:
+            import shutil
+            live_jsonl = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.jsonl")
+            final_jsonl = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}.jsonl")
+            if os.path.exists(live_jsonl):
+                shutil.copyfile(live_jsonl, final_jsonl)
+    except Exception:
+        pass
 
     logger.info("Pipeline flow execution finished.")
     

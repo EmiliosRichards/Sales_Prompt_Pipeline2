@@ -24,10 +24,29 @@ from src.phone_retrieval.utils.helpers import (
     resolve_path,
 )
 
-load_dotenv(override=True)
+# Load .env but do NOT override environment variables already set by the shell.
+# This allows easy per-run overrides (e.g., prompt paths) without editing .env.
+load_dotenv(override=False)
 
 logger = logging.getLogger(__name__)
 BASE_FILE_PATH_FOR_RESOLVE = __file__
+
+def _detect_csv_delimiter(file_path: str) -> str:
+    """Detect delimiter for CSV inputs; default to comma if unsure."""
+    try:
+        with open(file_path, "r", encoding="utf-8", newline="") as f:
+            sample = f.read(4096)
+            if not sample:
+                return ","
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|:")
+                return dialect.delimiter or ","
+            except Exception:
+                counts = {sep: sample.count(sep) for sep in [";", ",", "\t", "|", ":"]}
+                best = max(counts.items(), key=lambda kv: kv[1])
+                return best[0] if best[1] > 0 else ","
+    except Exception:
+        return ","
 
 
 def _parse_args() -> argparse.Namespace:
@@ -193,7 +212,9 @@ def _run_worker(job: WorkerJob) -> str:
 
 def _infer_total_rows(input_path: str) -> int:
     if input_path.lower().endswith(".csv"):
-        return len(pd.read_csv(input_path))
+        sep = _detect_csv_delimiter(input_path)
+        # Use python engine for robustness with multiline quoted fields.
+        return len(pd.read_csv(input_path, sep=sep, engine="python", dtype=str, keep_default_na=False, na_filter=False))
     if input_path.lower().endswith((".xls", ".xlsx")):
         return len(pd.read_excel(input_path))
     raise ValueError(f"Unsupported input type: {input_path}")
@@ -272,7 +293,10 @@ def _write_augmented_csv(
         # Keep scope simple for now; the results CSV is still produced for XLSX inputs.
         return
 
-    original_df = pd.read_csv(input_file_path_abs)
+    # Preserve the input delimiter (many Apollo exports are semicolon-delimited).
+    detected_sep = _detect_csv_delimiter(input_file_path_abs)
+
+    original_df = pd.read_csv(input_file_path_abs, sep=detected_sep, keep_default_na=False, na_filter=False)
 
     # Slice original rows to match what we processed.
     start0 = max(0, original_start_row_1based - 1)
@@ -367,7 +391,7 @@ def _write_augmented_csv(
     original_slice["HttpFallbackUsed"] = [(_as_str_or_none(v) or "") for v in http_fb.tolist()]
     original_slice["HttpFallbackResult"] = [(_as_str_or_none(v) or "") for v in http_fb_result.tolist()]
 
-    original_slice.to_csv(output_path, index=False, encoding="utf-8")
+    original_slice.to_csv(output_path, index=False, encoding="utf-8", sep=detected_sep)
 
 
 def main() -> None:
@@ -454,7 +478,10 @@ def main() -> None:
 
     worker_outputs: List[str] = []
     with ProcessPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_run_worker, job): job for job in jobs}
+        futures = {}
+        for job in jobs:
+            logger.info(f"Worker start: {job.run_id} range={job.row_range}")
+            futures[ex.submit(_run_worker, job)] = job
         for fut in as_completed(futures):
             job = futures[fut]
             out_path = fut.result()

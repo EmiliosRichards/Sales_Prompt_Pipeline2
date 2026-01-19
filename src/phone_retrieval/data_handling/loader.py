@@ -24,6 +24,28 @@ except ImportError:
     logger.info("Basic logging configured for loader.py due to missing core.logging_config or its dependencies.")
 
 
+def _detect_csv_delimiter(file_path: str) -> str:
+    """
+    Detect the delimiter used in a CSV. Returns ',' if unsure.
+
+    Note: Phone extraction inputs are often semicolon-delimited (e.g., Apollo exports).
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8", newline="") as f:
+            sample = f.read(4096)
+            if not sample:
+                return ","
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|:")
+                return dialect.delimiter or ","
+            except Exception:
+                counts = {sep: sample.count(sep) for sep in [";", ",", "\t", "|", ":"]}
+                best = max(counts.items(), key=lambda kv: kv[1])
+                return best[0] if best[1] > 0 else ","
+    except Exception:
+        return ","
+
+
 def _is_row_empty(row_values: Iterable) -> bool:
     """Checks if all values in a row are None, empty string, or whitespace-only."""
     if not row_values: # Handles case where row_values itself might be None or an empty list/tuple
@@ -156,8 +178,9 @@ def load_and_preprocess_data(file_path: str, app_config_instance: Optional[AppCo
                 #    df = pd.DataFrame(data_rows) # Fallback if header is somehow None but data exists
 
             elif file_path.endswith('.csv'):
+                detected_sep = _detect_csv_delimiter(file_path)
                 with open(file_path, mode='r', encoding='utf-8', newline='') as csvfile: # Specify encoding
-                    reader = csv.reader(csvfile)
+                    reader = csv.reader(csvfile, delimiter=detected_sep)
                     
                     # 1. Read header
                     try:
@@ -202,7 +225,8 @@ def load_and_preprocess_data(file_path: str, app_config_instance: Optional[AppCo
         else: # Original logic (fixed range or smart read disabled)
             logger.info(f"Using standard pandas read. Pandas skiprows argument: {pandas_skiprows_arg}, nrows: {nrows_val}")
             if file_path.endswith('.csv'):
-                df = pd.read_csv(file_path, header=0, skiprows=pandas_skiprows_arg, nrows=nrows_val)
+                detected_sep = _detect_csv_delimiter(file_path)
+                df = pd.read_csv(file_path, header=0, skiprows=pandas_skiprows_arg, nrows=nrows_val, sep=detected_sep, keep_default_na=False, na_filter=False)
             elif file_path.endswith(('.xls', '.xlsx')):
                 df = pd.read_excel(file_path, header=0, skiprows=pandas_skiprows_arg, nrows=nrows_val)
             else:

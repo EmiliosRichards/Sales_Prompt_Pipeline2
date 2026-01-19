@@ -28,14 +28,67 @@ from src.utils.helpers import (
 )
 from src.reporting.metrics_manager import write_run_metrics
 from src.processing.pipeline_flow import execute_pipeline_flow
+from src.processing.parallel_full_pipeline import run_parallel_full_pipeline
 from src.reporting.main_report_orchestrator import generate_all_reports # NEW
 
-load_dotenv(override=True)
+# Load .env but do NOT override environment variables already set by the shell.
+# This makes it easy to override prompt paths / flags per-run without editing .env.
+load_dotenv(override=False)
 
 logger = logging.getLogger(__name__)
 
 # __file__ will refer to main_pipeline.py's location
 BASE_FILE_PATH_FOR_RESOLVE = __file__
+
+def _discover_scraped_content_dirs(base_path_abs: str) -> List[str]:
+    """
+    Given either:
+    - a run directory (output_data/<run_id>)
+    - a workers directory (output_data/<run_id>/workers)
+    - a scraped_content directory
+
+    Return a list of scraped_content directories to use as read-only cache roots.
+    """
+    base_path_abs = os.path.normpath(base_path_abs)
+    out: List[str] = []
+
+    if not os.path.isdir(base_path_abs):
+        return out
+
+    # If the user already pointed directly at a scraped_content directory
+    if os.path.basename(base_path_abs).lower() == "scraped_content":
+        out.append(base_path_abs)
+        return out
+
+    # Common: run_dir/scraped_content
+    direct = os.path.join(base_path_abs, "scraped_content")
+    if os.path.isdir(direct):
+        out.append(direct)
+
+    # Common: phone_extract parallel run: run_dir/workers/**/scraped_content
+    workers_dir = os.path.join(base_path_abs, "workers")
+    if os.path.isdir(workers_dir):
+        # Limit walk depth to avoid scanning huge trees
+        max_depth = 4
+        base_depth = workers_dir.rstrip(os.sep).count(os.sep)
+        for root, dirs, _files in os.walk(workers_dir):
+            depth = root.rstrip(os.sep).count(os.sep) - base_depth
+            if depth > max_depth:
+                dirs[:] = []
+                continue
+            for d in list(dirs):
+                if d.lower() == "scraped_content":
+                    out.append(os.path.join(root, d))
+    # Deduplicate while preserving order
+    seen = set()
+    uniq: List[str] = []
+    for p in out:
+        p = os.path.normpath(p)
+        if p in seen:
+            continue
+        seen.add(p)
+        uniq.append(p)
+    return uniq
 
 def main(args) -> None:
     """
@@ -57,6 +110,34 @@ def main(args) -> None:
     if getattr(args, 'force_phone_extraction', False):
         try:
             app_config.force_phone_extraction = True
+        except Exception:
+            pass
+    # Skip phone retrieval override from CLI (useful when phone_extract ran first)
+    if getattr(args, 'skip_phone_retrieval', False):
+        try:
+            app_config.enable_phone_retrieval_in_full_pipeline = False
+        except Exception:
+            pass
+
+    # Reuse scraped content (e.g. from phone_extract) to avoid re-scraping websites
+    reuse_sources = getattr(args, "reuse_scraped_content_from", None) or []
+    if reuse_sources:
+        try:
+            app_config.reuse_scraped_content_if_available = True
+            cache_dirs: List[str] = []
+            for raw in reuse_sources:
+                base_abs = resolve_path(str(raw), BASE_FILE_PATH_FOR_RESOLVE)
+                cache_dirs.extend(_discover_scraped_content_dirs(base_abs))
+            # If the user already provided scraped_content dirs, keep them too
+            if not cache_dirs:
+                for raw in reuse_sources:
+                    base_abs = resolve_path(str(raw), BASE_FILE_PATH_FOR_RESOLVE)
+                    cache_dirs.append(os.path.normpath(base_abs))
+            # Deduplicate
+            seen = set()
+            cache_dirs = [d for d in cache_dirs if d and os.path.isdir(d) and not (d in seen or seen.add(d))]
+            app_config.scraped_content_cache_dirs = cache_dirs
+            logger.info(f"Scrape reuse enabled. Using {len(cache_dirs)} scraped_content cache dir(s).")
         except Exception:
             pass
     pipeline_start_time = time.time()
@@ -210,6 +291,26 @@ def main(args) -> None:
         # These variables will be populated by execute_pipeline_flow
         # final_consolidated_data_by_true_base is replaced by all_match_outputs
         # true_base_scraper_status might still be relevant for overall scraping stats
+        if getattr(args, "workers", 1) and int(getattr(args, "workers", 1)) > 1:
+            # Parallel end-to-end mode: workers run the full pipeline for row slices.
+            # The master process writes a live CSV + JSONL as rows arrive.
+            run_parallel_full_pipeline(
+                input_file_path_abs=input_file_path_abs,
+                input_profile=app_config.input_file_profile_name,
+                app_config=app_config,
+                run_id=run_id,
+                run_output_dir=run_output_dir,
+                llm_context_dir=llm_context_dir,
+                llm_requests_dir=llm_requests_dir,
+                golden_partner_summaries=golden_partner_summaries,
+                workers=int(getattr(args, "workers", 1)),
+                row_range=getattr(args, "range", "") or "",
+                skip_prequalification=getattr(args, "skip_prequalification", False),
+                pitch_from_description=getattr(args, "pitch_from_description", False),
+            )
+            # In parallel mode, the orchestrator produces the SalesOutreachReport_* files directly.
+            return
+
         (df, all_match_outputs, attrition_data_list, canonical_domain_journey_data,
          true_base_scraper_status, true_base_to_pathful_map, input_to_canonical_map,
          row_level_failure_counts
@@ -320,6 +421,23 @@ if __name__ == '__main__':
         "--force-phone-extraction",
         action="store_true",
         help="Always run phone extraction on every row, even if an input phone exists. Can also be enabled via FORCE_PHONE_EXTRACTION env var."
+    )
+    parser.add_argument(
+        "--skip-phone-retrieval",
+        action="store_true",
+        help="Skip the phone retrieval step inside the full pipeline (useful if you already ran phone_extract.py to enrich phones in bulk)."
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Run the full pipeline in parallel across row ranges (Windows-safe multiprocessing). Writes live CSV + JSONL as rows complete."
+    )
+    parser.add_argument(
+        "--reuse-scraped-content-from",
+        action="append",
+        default=[],
+        help="Reuse existing cleaned scrape artifacts (e.g. from a phone_extract run directory or scraped_content dir) to avoid re-scraping websites. Can be repeated.",
     )
     args = parser.parse_args()
 

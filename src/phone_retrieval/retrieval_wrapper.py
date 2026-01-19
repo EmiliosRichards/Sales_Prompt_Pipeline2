@@ -105,7 +105,12 @@ def retrieve_phone_numbers_for_url(
         if final_consolidated_data:
             domain_bundle = next(iter(final_consolidated_data.values()), None)
             if domain_bundle and domain_bundle.company_contact_details:
-                return domain_bundle.company_contact_details.consolidated_numbers, "Success"
+                numbers = domain_bundle.company_contact_details.consolidated_numbers or []
+                if len(numbers) > 0:
+                    return numbers, "Success"
+                # ContactDetails exists but no consolidated numbers made it through.
+                # Treat this as "no numbers found" rather than a successful retrieval.
+                # Fall through to interpret via run_metrics below.
         
         if run_metrics["regex_extraction_stats"]["total_regex_candidates_found"] == 0:
             return None, "No_Candidates_Found"
