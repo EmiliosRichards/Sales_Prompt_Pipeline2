@@ -63,6 +63,10 @@ def _normalize_phone_str(val: Any) -> str:
         return ""
 
 
+def _is_blank_cell(val: Any) -> bool:
+    return _normalize_phone_str(val) == ""
+
+
 def _pick_first_usable_phone(row: pd.Series, df: pd.DataFrame, col_names: List[str]) -> str:
     """Return the first phone value that looks usable (or '' if none)."""
     for col in col_names:
@@ -214,6 +218,7 @@ def execute_pipeline_flow(
     sales_jsonl_reporter: Optional[LiveJsonlReporter] = None
 
     if live_reporter is None and row_queue is None:
+        # SalesOutreach live outputs
         live_report_header = list(df.columns) + [
             'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status', 'is_b2b', 'serves_1000',
             'is_b2b_reason', 'serves_1000_reason', 'description', 'Industry',
@@ -228,7 +233,7 @@ def execute_pipeline_flow(
         sales_jsonl_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.jsonl")
         sales_jsonl_reporter = LiveJsonlReporter(filepath=sales_jsonl_path)
 
-        # Also write an "augmented input" live file (CSV + JSONL) for easy downstream usage.
+        # Augmented-input live outputs (original columns + enrichment columns).
         augmented_header = list(df.columns) + [
             'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status',
             'description', 'Industry',
@@ -686,6 +691,7 @@ def execute_pipeline_flow(
 
             phone_status = "Not_Processed"
             if not pitch_from_description:
+                phone_meta = None
                 if not getattr(app_config, "enable_phone_retrieval_in_full_pipeline", True):
                     # Do not perform phone retrieval within the full pipeline.
                     # Still treat a usable input phone as the "found_number" so reports are consistent.
@@ -696,6 +702,13 @@ def execute_pipeline_flow(
                             num = num[1:].strip()
                         if num:
                             df.at[index, 'found_number'] = num
+                            # Populate Top_/Primary_ compatibility fields from provided input.
+                            df.at[index, "Top_Number_1"] = num
+                            df.at[index, "Top_Type_1"] = "Provided_In_Input"
+                            df.at[index, "Top_SourceURL_1"] = ""
+                            df.at[index, "Primary_Number_1"] = num
+                            df.at[index, "Primary_Type_1"] = "Provided_In_Input"
+                            df.at[index, "Primary_SourceURL_1"] = ""
                     else:
                         phone_status = "Skipped_Phone_Retrieval"
                         logger.info(f"{log_identifier} Phone retrieval skipped (ENABLE_PHONE_RETRIEVAL_IN_FULL_PIPELINE=False).")
@@ -704,7 +717,7 @@ def execute_pipeline_flow(
                         logger.info(f"{log_identifier} Force flag enabled. Attempting phone retrieval.")
                     else:
                         logger.info(f"{log_identifier} No phone number in input. Attempting retrieval.")
-                    retrieved_numbers, phone_status = retrieve_phone_numbers_for_url(
+                    retrieved_numbers, phone_status, phone_meta = retrieve_phone_numbers_for_url(
                         given_url_original_str,
                         company_name_str,
                         app_config,
@@ -712,6 +725,11 @@ def execute_pipeline_flow(
                         llm_context_dir=os.path.join(llm_context_dir, "phone_retrieval"),
                         run_id=run_id
                     )
+                    # Best-effort: copy phone retrieval debug fields into this run's df for live CSV/JSONL.
+                    if phone_meta:
+                        for k, v in phone_meta.items():
+                            if k in df.columns:
+                                df.at[index, k] = v
                     if retrieved_numbers:
                         primary_numbers = [n for n in retrieved_numbers if n.classification == 'Primary']
                         secondary_numbers = [n for n in retrieved_numbers if n.classification == 'Secondary']
@@ -728,6 +746,25 @@ def execute_pipeline_flow(
                         
                         if best_number:
                             df.at[index, 'found_number'] = best_number
+                            # If the wrapper returned detailed fields, prefer those; otherwise fill minimal compatibility.
+                            if _is_blank_cell(df.at[index, "Top_Number_1"]):
+                                df.at[index, "Top_Number_1"] = best_number
+                            if _is_blank_cell(df.at[index, "Top_Type_1"]):
+                                df.at[index, "Top_Type_1"] = "Retrieved"
+                            if _is_blank_cell(df.at[index, "Top_SourceURL_1"]):
+                                df.at[index, "Top_SourceURL_1"] = ""
+                            if primary_numbers and _is_blank_cell(df.at[index, "Primary_Number_1"]):
+                                df.at[index, "Primary_Number_1"] = primary_numbers[0].number
+                                if _is_blank_cell(df.at[index, "Primary_Type_1"]):
+                                    df.at[index, "Primary_Type_1"] = "Retrieved"
+                                if _is_blank_cell(df.at[index, "Primary_SourceURL_1"]):
+                                    df.at[index, "Primary_SourceURL_1"] = ""
+                            if secondary_numbers and _is_blank_cell(df.at[index, "Secondary_Number_1"]):
+                                df.at[index, "Secondary_Number_1"] = secondary_numbers[0].number
+                                if _is_blank_cell(df.at[index, "Secondary_Type_1"]):
+                                    df.at[index, "Secondary_Type_1"] = "Retrieved"
+                                if _is_blank_cell(df.at[index, "Secondary_SourceURL_1"]):
+                                    df.at[index, "Secondary_SourceURL_1"] = ""
                             logger.info(f"{log_identifier} Found best number: {best_number} (Status: {phone_status})")
                     else:
                         logger.warning(f"{log_identifier} Phone number retrieval failed with status: {phone_status}")
@@ -742,6 +779,13 @@ def execute_pipeline_flow(
                             num = num[1:].strip()
                         if num:
                             df.at[index, 'found_number'] = num
+                            # Populate Top_/Primary_ compatibility fields from provided input.
+                            df.at[index, "Top_Number_1"] = num
+                            df.at[index, "Top_Type_1"] = "Provided_In_Input"
+                            df.at[index, "Top_SourceURL_1"] = ""
+                            df.at[index, "Primary_Number_1"] = num
+                            df.at[index, "Primary_Type_1"] = "Provided_In_Input"
+                            df.at[index, "Primary_SourceURL_1"] = ""
             df.at[index, 'PhoneNumber_Status'] = phone_status
 
             # Decide whether we have a usable phone number for outreach (found or usable input fallback).
@@ -767,23 +811,29 @@ def execute_pipeline_flow(
                 if phone_status in {"No_Numbers_Found", "No_Main_Line_Found", "Skipped_Phone_Retrieval", "Not_Processed"}:
                     df.at[index, 'PhoneNumber_Status'] = "Provided_In_Input_CompanyPhone"
                 found_number_val = input_number_val
+                # Populate Top_/Primary_ compatibility fields from fallback input phone.
+                df.at[index, "Top_Number_1"] = input_number_val
+                df.at[index, "Top_Type_1"] = "Provided_In_Input"
+                df.at[index, "Top_SourceURL_1"] = ""
+                df.at[index, "Primary_Number_1"] = input_number_val
+                df.at[index, "Primary_Type_1"] = "Provided_In_Input"
+                df.at[index, "Primary_SourceURL_1"] = ""
+
+            # NOTE: We always create a GoldenPartnerMatchOutput for the row (even when skipping),
+            # so downstream outputs can show a reason rather than being blank.
+            final_match_output: Optional[GoldenPartnerMatchOutput] = None
 
             if not has_phone_for_outreach:
                 # Skip partner matching + sales pitch if we have no phone number to call.
-                all_golden_partner_match_outputs.append(
-                    GoldenPartnerMatchOutput(
-                        analyzed_company_url=given_url_original_str,
-                        analyzed_company_attributes=detailed_attributes_obj,
-                        summary=website_summary_obj.summary if website_summary_obj else None,
-                        match_rationale_features=["Skipped pitch generation: no usable phone number found"],
-                        scrape_status=current_row_scraper_status
-                    )
+                final_match_output = GoldenPartnerMatchOutput(
+                    analyzed_company_url=given_url_original_str,
+                    analyzed_company_attributes=detailed_attributes_obj,
+                    summary=website_summary_obj.summary if website_summary_obj else None,
+                    match_rationale_features=["Skipped pitch generation: no usable phone number found"],
+                    scrape_status=current_row_scraper_status,
                 )
-                input_to_canonical_map[given_url_original_str] = true_base_domain_for_row
-                # Continue to live reporting block below (final_match_output remains None)
-                # Note: no 'continue' here because we still want to write live report output for the row.
+                all_golden_partner_match_outputs.append(final_match_output)
             else:
-
                 # --- 5. LLM Call 3: Match Partner ---
                 partner_match_tuple = match_partner(
                     gemini_client=gemini_client,
@@ -794,7 +844,7 @@ def execute_pipeline_flow(
                     llm_requests_dir=llm_requests_dir,
                     file_identifier_prefix=llm_file_prefix_row,
                     triggering_input_row_id=index,
-                    triggering_company_name=company_name_str
+                    triggering_company_name=company_name_str,
                 )
                 partner_match_output = partner_match_tuple[0]
                 if partner_match_tuple[2]:  # token_stats
@@ -803,8 +853,15 @@ def execute_pipeline_flow(
                     run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += partner_match_tuple[2].get("total_tokens", 0)
                     run_metrics["llm_processing_stats"]["llm_calls_partner_matching"] = run_metrics["llm_processing_stats"].get("llm_calls_partner_matching", 0) + 1
 
-                if not partner_match_output or not partner_match_output.matched_partner_name or partner_match_output.matched_partner_name == "No suitable match found":
-                    logger.warning(f"{log_identifier} LLM Call 3 (Partner Matching) failed or found no suitable match. Raw: {partner_match_tuple[1]}")
+                if (
+                    not partner_match_output
+                    or not partner_match_output.matched_partner_name
+                    or partner_match_output.matched_partner_name == "No suitable match found"
+                ):
+                    logger.warning(
+                        f"{log_identifier} LLM Call 3 (Partner Matching) failed or found no suitable match. "
+                        f"Raw: {partner_match_tuple[1]}"
+                    )
                     log_row_failure(
                         failure_writer, index, company_name_str, given_url_original_str,
                         "LLM_PartnerMatching_FailedOrNoMatch", "Failed to find a suitable partner match.",
@@ -812,23 +869,38 @@ def execute_pipeline_flow(
                         json.dumps({"raw_response": partner_match_tuple[1] or "N/A"})
                     )
                     row_level_failure_counts["LLM_PartnerMatching_FailedOrNoMatch"] += 1
-                    all_golden_partner_match_outputs.append(
-                        GoldenPartnerMatchOutput(
+                    final_match_output = GoldenPartnerMatchOutput(
+                        analyzed_company_url=detailed_attributes_obj.input_summary_url,
+                        analyzed_company_attributes=detailed_attributes_obj,
+                        summary=website_summary_obj.summary if website_summary_obj else None,
+                        match_rationale_features=["LLM Partner Matching Failed or No Match Found"],
+                        scrape_status=current_row_scraper_status,
+                    )
+                    all_golden_partner_match_outputs.append(final_match_output)
+                else:
+                    logger.info(
+                        f"{log_identifier} LLM Call 3 (Partner Matching) successful. "
+                        f"Matched with: {partner_match_output.matched_partner_name}"
+                    )
+
+                    # --- 6. LLM Call 4: Generate Sales Pitch ---
+                    matched_partner_data = next(
+                        (p for p in golden_partner_summaries if p.get('name') == partner_match_output.matched_partner_name),
+                        None
+                    )
+                    if not matched_partner_data:
+                        logger.error(
+                            f"{log_identifier} Could not find full data for matched partner: "
+                            f"{partner_match_output.matched_partner_name}"
+                        )
+                        final_match_output = GoldenPartnerMatchOutput(
                             analyzed_company_url=detailed_attributes_obj.input_summary_url,
                             analyzed_company_attributes=detailed_attributes_obj,
                             summary=website_summary_obj.summary if website_summary_obj else None,
-                            match_rationale_features=["LLM Partner Matching Failed or No Match Found"],
-                            scrape_status=current_row_scraper_status
+                            match_rationale_features=["Matched partner data missing; pitch not generated"],
+                            scrape_status=current_row_scraper_status,
                         )
-                    )
-                else:
-                    logger.info(f"{log_identifier} LLM Call 3 (Partner Matching) successful. Matched with: {partner_match_output.matched_partner_name}")
-
-                    # --- 6. LLM Call 4: Generate Sales Pitch ---
-                    matched_partner_data = next((p for p in golden_partner_summaries if p.get('name') == partner_match_output.matched_partner_name), None)
-
-                    if not matched_partner_data:
-                        logger.error(f"{log_identifier} Could not find full data for matched partner: {partner_match_output.matched_partner_name}")
+                        all_golden_partner_match_outputs.append(final_match_output)
                     else:
                         sales_pitch_tuple = generate_sales_pitch(
                             gemini_client=gemini_client,
@@ -841,7 +913,7 @@ def execute_pipeline_flow(
                             llm_requests_dir=llm_requests_dir,
                             file_identifier_prefix=llm_file_prefix_row,
                             triggering_input_row_id=index,
-                            triggering_company_name=company_name_str
+                            triggering_company_name=company_name_str,
                         )
                         final_match_output = sales_pitch_tuple[0]
                         if sales_pitch_tuple[2]:  # token_stats
@@ -851,7 +923,10 @@ def execute_pipeline_flow(
                             run_metrics["llm_processing_stats"]["llm_calls_sales_pitch_generation"] = run_metrics["llm_processing_stats"].get("llm_calls_sales_pitch_generation", 0) + 1
 
                         if not final_match_output:
-                            logger.warning(f"{log_identifier} LLM Call 4 (Sales Pitch Generation) failed. Raw: {sales_pitch_tuple[1]}")
+                            logger.warning(
+                                f"{log_identifier} LLM Call 4 (Sales Pitch Generation) failed. "
+                                f"Raw: {sales_pitch_tuple[1]}"
+                            )
                             log_row_failure(
                                 failure_writer, index, company_name_str, given_url_original_str,
                                 "LLM_SalesPitchGeneration_Failed", "Failed to generate sales pitch.",
@@ -859,15 +934,14 @@ def execute_pipeline_flow(
                                 json.dumps({"raw_response": sales_pitch_tuple[1] or "N/A"})
                             )
                             row_level_failure_counts["LLM_SalesPitchGeneration_Failed"] += 1
-                            all_golden_partner_match_outputs.append(
-                                GoldenPartnerMatchOutput(
-                                    analyzed_company_url=detailed_attributes_obj.input_summary_url,
-                                    analyzed_company_attributes=detailed_attributes_obj,
-                                    summary=website_summary_obj.summary if website_summary_obj else None,
-                                    match_rationale_features=["LLM Sales Pitch Generation Failed"],
-                                    scrape_status=current_row_scraper_status
-                                )
+                            final_match_output = GoldenPartnerMatchOutput(
+                                analyzed_company_url=detailed_attributes_obj.input_summary_url,
+                                analyzed_company_attributes=detailed_attributes_obj,
+                                summary=website_summary_obj.summary if website_summary_obj else None,
+                                match_rationale_features=["LLM Sales Pitch Generation Failed"],
+                                scrape_status=current_row_scraper_status,
                             )
+                            all_golden_partner_match_outputs.append(final_match_output)
                         else:
                             logger.info(f"{log_identifier} LLM Call 4 (Sales Pitch Generation) successful.")
                             # Fill the programmatic placeholder with the golden partner's "Avg Leads Per Day"
@@ -875,7 +949,7 @@ def execute_pipeline_flow(
                             try:
                                 final_match_output.phone_sales_line = _fill_programmatic_placeholder(
                                     final_match_output.phone_sales_line,
-                                    final_match_output.avg_leads_per_day
+                                    final_match_output.avg_leads_per_day,
                                 )
                             except Exception:
                                 pass
@@ -884,8 +958,7 @@ def execute_pipeline_flow(
                             final_match_output.summary = website_summary_obj.summary if website_summary_obj else None
                             all_golden_partner_match_outputs.append(final_match_output)
 
-                # --- End of LLM Flow for a row ---
-                input_to_canonical_map[given_url_original_str] = true_base_domain_for_row
+            input_to_canonical_map[given_url_original_str] = true_base_domain_for_row
 
             if true_base_domain_for_row:
                 if true_base_domain_for_row not in canonical_domain_journey_data:
@@ -916,9 +989,13 @@ def execute_pipeline_flow(
                 )
 
             # --- Live Reporting ---
-            # After all processing for a row is complete (or has failed),
-            # gather all data and write to the live report.
-            final_row_data = row.to_dict()
+            # After all processing for a row is complete (or has failed), gather all data and write outputs.
+            #
+            # IMPORTANT: Use the *current* dataframe row (not the iterrows() snapshot) so any df.at[...] updates
+            # (Top_Number_*, Primary_/Secondary_*, Regex/LLM debug fields, etc.) are included in:
+            # - single-process live CSV/JSONL
+            # - parallel worker streaming payloads (row_queue)
+            final_row_data = df.loc[index].to_dict()
             # Update with data gathered during the pipeline flow
             final_row_data.update({
                 'CanonicalEntryURL': true_base_domain_for_row,

@@ -7,12 +7,13 @@ import asyncio
 import logging
 import os
 import tempfile
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.config import AppConfig
-from src.core.schemas import ConsolidatedPhoneNumber, DomainExtractionBundle
+from src.core.schemas import ConsolidatedPhoneNumber
 from src.phone_retrieval.extractors.llm_extractor import GeminiLLMExtractor
 from src.phone_retrieval.processing.pipeline_flow import execute_pipeline_flow
+from src.phone_retrieval.utils.helpers import initialize_dataframe_columns
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ def retrieve_phone_numbers_for_url(
     run_output_dir: Optional[str] = None,
     llm_context_dir: Optional[str] = None,
     run_id: Optional[str] = None,
-) -> Tuple[Optional[List[ConsolidatedPhoneNumber]], str]:
+) -> Tuple[Optional[List[ConsolidatedPhoneNumber]], str, Dict[str, Any]]:
     """
     Retrieves phone numbers for a given URL by running a simplified, in-memory version
     of the phone retrieval pipeline.
@@ -45,6 +46,7 @@ def retrieve_phone_numbers_for_url(
     # Create a temporary DataFrame to drive the pipeline
     import pandas as pd
     df = pd.DataFrame([{"GivenURL": url, "CompanyName": company_name}])
+    df = initialize_dataframe_columns(df)
 
     # Use the provided app_config for the phone retrieval
     llm_extractor = GeminiLLMExtractor(config=app_config)
@@ -90,7 +92,7 @@ def retrieve_phone_numbers_for_url(
                 "row_level_failure_summary": {}, "unique_true_base_domains_consolidated": 0,
             }
         }
-        _, _, _, final_consolidated_data, _, _, _, _ = execute_pipeline_flow(
+        df_processed, _, _, final_consolidated_data, _, _, _, _ = execute_pipeline_flow(
             df=df,
             app_config=app_config,
             llm_extractor=llm_extractor,
@@ -102,21 +104,41 @@ def retrieve_phone_numbers_for_url(
             original_phone_col_name_for_profile=None
         )
 
+        meta: Dict[str, Any] = {}
+        try:
+            if df_processed is not None and not df_processed.empty:
+                row0 = df_processed.iloc[0].to_dict()
+                keep = [
+                    "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
+                    "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
+                    "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
+                    "Primary_Number_1", "Primary_Type_1", "Primary_SourceURL_1",
+                    "Secondary_Number_1", "Secondary_Type_1", "Secondary_SourceURL_1",
+                    "Secondary_Number_2", "Secondary_Type_2", "Secondary_SourceURL_2",
+                    "RegexCandidateSnippets", "BestMatchedPhoneNumbers", "OtherRelevantNumbers",
+                    "ConfidenceScore", "LLMExtractedNumbers", "LLMContextPath",
+                    "Final_Row_Outcome_Reason", "Determined_Fault_Category",
+                    "ScrapingStatus",
+                ]
+                meta = {k: row0.get(k) for k in keep if k in row0}
+        except Exception:
+            meta = {}
+
         if final_consolidated_data:
             domain_bundle = next(iter(final_consolidated_data.values()), None)
             if domain_bundle and domain_bundle.company_contact_details:
                 numbers = domain_bundle.company_contact_details.consolidated_numbers or []
                 if len(numbers) > 0:
-                    return numbers, "Success"
+                    return numbers, "Success", meta
                 # ContactDetails exists but no consolidated numbers made it through.
                 # Treat this as "no numbers found" rather than a successful retrieval.
                 # Fall through to interpret via run_metrics below.
         
         if run_metrics["regex_extraction_stats"]["total_regex_candidates_found"] == 0:
-            return None, "No_Candidates_Found"
+            return None, "No_Candidates_Found", meta
 
     except Exception as e:
         logger.error(f"Error during phone number retrieval for {url}: {e}", exc_info=True)
-        return None, "Error"
+        return None, "Error", {}
 
-    return None, "No_Main_Line_Found"
+    return None, "No_Main_Line_Found", meta

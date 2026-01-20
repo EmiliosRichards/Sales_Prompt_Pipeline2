@@ -5,6 +5,13 @@ This repo contains **two related pipelines**:
 - **Full pipeline**: scrapes + summarizes + extracts attributes + partner-matches + generates sales pitch, and optionally retrieves a phone number. Entry point: `main_pipeline.py`.
 - **Phone-only pipeline (isolated)**: does *only* phone retrieval (scrape → regex candidates → LLM classify → consolidate → choose top numbers) and writes results + an augmented input file. Entry point: `phone_extract.py`.
 
+Additional docs live in:
+- `docs/SYSTEM_OVERVIEW.md`
+- `docs/OUTPUT_FILES.md`
+- `docs/PHONE_NUMBER_FIELDS.md`
+- `docs/PERSON_ASSOCIATED_NUMBERS.md` (proposal)
+- `docs/GOLDEN_PARTNER_MATCHING_IMPROVEMENTS.md` (proposal)
+
 ---
 
 ### 1) Quickstart (Windows / PowerShell)
@@ -50,10 +57,18 @@ python phone_extract.py -i "data\Apollo Shopware Partner Germany 1(Sheet1).csv" 
 Phone-only runs always write into **one master run folder**:
 
 - `output_data/<master_run_id>/phone_extraction_results_<master_run_id>_merged.csv`
+- `output_data/<master_run_id>/phone_extraction_results_<master_run_id>_merged.jsonl`
 - `output_data/<master_run_id>/input_augmented_<master_run_id>.csv` (CSV inputs only)
+- `output_data/<master_run_id>/input_augmented_<master_run_id>.jsonl` (CSV inputs only)
 - `output_data/<master_run_id>/phone_extract_<master_run_id>.log`
+- `output_data/<master_run_id>/phone_extract_<master_run_id>_live_status.json` (progress counters: jobs/rows written)
+- `output_data/<master_run_id>/phone_extraction_results_<master_run_id>_live.csv` (incremental progress)
+- `output_data/<master_run_id>/phone_extraction_results_<master_run_id>_live.jsonl` (incremental progress)
+- `output_data/<master_run_id>/input_augmented_<master_run_id>_live.csv` (incremental progress; preserves input delimiter)
+- `output_data/<master_run_id>/input_augmented_<master_run_id>_live.jsonl` (incremental progress)
 - `output_data/<master_run_id>/workers/`
   - `workers/wXofN/phone_extraction_results_wXofN.csv`
+  - `workers/wXofN/phone_extraction_results_wXofN.jsonl`
   - `workers/wXofN/failed_rows_wXofN.csv`
   - `workers/wXofN/run_metrics_wXofN.md`
   - `workers/wXofN/scraped_content/...` (scraped cleaned-text artifacts)
@@ -71,6 +86,25 @@ The phone-only result CSV includes many internal columns; the **augmented CSV** 
 - `HttpFallbackResult`
 
 Phone-only also preserves your original input columns because it slices and re-attaches them when writing `input_augmented_*.csv`.
+
+#### “Top” vs “Primary/Secondary” numbers (what’s redundant?)
+The phone pipeline produces *two* overlapping views of selected numbers:
+
+- **`Top_Number_1..3`**: the **ranked best-to-worst call list** for the company/website (what you actually dial).
+- **`Primary_Number_1`**: the best number classified as **Primary** (often “Zentrale / Main Line / HQ”).
+- **`Secondary_Number_1..2`**: the best numbers classified as **Secondary** (often direct dials, support, fax, etc).
+
+In practice, `Top_Number_1` is usually equal to either `Primary_Number_1` or `Secondary_Number_1` depending on what exists and how the LLM classified the context. We keep both because:
+- `Top_*` is operational (“call first/second/third”).
+- `Primary/Secondary_*` is diagnostic/backward-compatibility for older templates and analyses.
+
+#### Debug/trace columns (why they sometimes look empty)
+Some columns contain **lists/dicts** and are therefore written as:
+- **CSV**: JSON strings (e.g. `"[]"`, `"[{...}]"`)
+- **JSONL**: real JSON arrays/objects.
+
+These columns are only “meaningfully populated” when the relevant stage ran:
+- `RegexCandidateSnippets`, `LLMExtractedNumbers`, `LLMContextPath`, `ConfidenceScore`, `BestMatchedPhoneNumbers`, `OtherRelevantNumbers`
 
 #### Phone number formatting (E.164 + Excel text protection)
 - Regex extraction produces candidates in **E.164** where possible (e.g. `+49...`).
@@ -203,6 +237,20 @@ The phone-only scraper (`src/phone_retrieval/scraper/scraper_logic.py`) can fall
 
 Per-row tracking is written to output columns:
 - `HttpFallbackAttempted`, `HttpFallbackUsed`, `HttpFallbackResult`
+
+#### Candidate capping (cost/speed control for phone LLM)
+The phone-only pipeline now ranks/dedupes/caps candidates before calling the phone LLM:
+- `PHONE_LLM_MAX_CANDIDATES_TOTAL` (default `120`)
+- `PHONE_LLM_PREFER_URL_PATH_KEYWORDS` (default includes contact/impressum/about)
+- `PHONE_LLM_PREFER_SNIPPET_KEYWORDS` (default includes tel/telefon/zentrale/etc.)
+
+#### Reuse scraped content + phone results cache (resume acceleration)
+- **Reuse scraped pages** (cleaned.txt artifacts) instead of re-scraping:
+  - `REUSE_SCRAPED_CONTENT_IF_AVAILABLE=True`
+  - `SCRAPED_CONTENT_CACHE_DIRS=...` (one or more `scraped_content` folders)
+- **Reuse consolidated phone results by canonical base** (optional):
+  - `REUSE_PHONE_RESULTS_IF_AVAILABLE=True`
+  - `PHONE_RESULTS_CACHE_DIR=cache/phone_results_cache`
 
 ---
 

@@ -4,6 +4,7 @@ import re
 import logging
 import time
 import hashlib # Added for hashing long filenames
+import shutil
 from urllib.parse import urljoin, urlparse, urldefrag, urlunparse
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 from bs4 import BeautifulSoup
@@ -112,6 +113,65 @@ def get_safe_filename(name_or_url: str, for_url: bool = False, max_len: int = 10
         safe_name_truncated = safe_name[:max_len]
         logger.info(f"DEBUG PATH: get_safe_filename (for_url=False) output: '{safe_name_truncated}' (original sanitized: '{safe_name}', max_len: {max_len}) from input '{original_input}'") # DEBUG PATH LENGTH
         return safe_name_truncated
+
+
+def _try_copy_cached_cleaned_pages(normalized_url: str, output_dir_for_run: str) -> Optional[List[Tuple[str, str, str]]]:
+    """
+    Attempt to reuse existing *_cleaned.txt artifacts from one or more cache directories.
+    On hit, copy them into this run's scraped_content directory and return them as scraped_pages_details.
+    """
+    try:
+        if not getattr(config_instance, "reuse_scraped_content_if_available", False):
+            return None
+        cache_dirs = getattr(config_instance, "scraped_content_cache_dirs", None) or []
+        if not cache_dirs:
+            return None
+
+        parsed = urlparse(normalized_url)
+        host = parsed.netloc or ""
+        host = host.split("@")[-1].split(":")[0]
+        host = re.sub(r"^www\\.", "", host)
+        if not host:
+            return None
+        safe_source_name = re.sub(r"[^\\w.-]", "_", host)[:50]
+
+        candidates: List[str] = []
+        for root in cache_dirs:
+            root = os.path.normpath(root)
+            domain_dir = os.path.join(root, safe_source_name)
+            if not os.path.isdir(domain_dir):
+                continue
+            try:
+                for fname in os.listdir(domain_dir):
+                    if fname.endswith("_cleaned.txt"):
+                        candidates.append(os.path.join(domain_dir, fname))
+            except Exception:
+                continue
+
+        if not candidates:
+            return None
+
+        try:
+            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        except Exception:
+            pass
+
+        base_scraped_content_dir = os.path.join(output_dir_for_run, config_instance.scraped_content_subdir)
+        os.makedirs(base_scraped_content_dir, exist_ok=True)
+
+        max_pages = int(getattr(config_instance, "scraper_pages_for_summary_count", 5) or 5)
+        details: List[Tuple[str, str, str]] = []
+        for fp in candidates[:max_pages]:
+            try:
+                dest = os.path.join(base_scraped_content_dir, f"CACHED__{os.path.basename(fp)}")
+                shutil.copyfile(fp, dest)
+                details.append((dest, normalized_url, "Cached"))
+            except Exception:
+                continue
+
+        return details if details else None
+    except Exception:
+        return None
 
 async def _fetch_html_via_httpx(
     url: str,
@@ -639,6 +699,16 @@ async def scrape_website(
     if not normalized_given_url or not normalized_given_url.startswith(('http://', 'https://')):
         logger.warning(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Invalid URL after normalization: {normalized_given_url}")
         return [], "InvalidURL", None, {"attempted": False, "used": False, "result": "not_attempted_invalid_url"}
+
+    # --- Reuse cached cleaned scrape artifacts (skip network scraping) ---
+    cached_pages = _try_copy_cached_cleaned_pages(normalized_given_url, output_dir_for_run)
+    if cached_pages:
+        try:
+            globally_processed_urls.add(normalized_given_url)
+        except Exception:
+            pass
+        logger.info(f"[RowID: {input_row_id}, Company: {company_name_or_id}] Reusing cached scraped content (cleaned.txt) instead of re-scraping.")
+        return cached_pages, "Success_CacheHit", normalized_given_url, {"attempted": False, "used": False, "result": "cache_hit"}
 
     # Initial robots.txt check for the very first normalized URL
     async with httpx.AsyncClient(follow_redirects=True, verify=False) as http_client:

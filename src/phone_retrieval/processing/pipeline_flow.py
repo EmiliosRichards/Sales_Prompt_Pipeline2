@@ -5,11 +5,20 @@ import json
 import time
 from datetime import datetime
 import logging
+import re
+from urllib.parse import urlparse
 from typing import List, Dict, Set, Optional, Any, Tuple, Callable # Added Callable
 from collections import Counter
 
 from src.core.config import AppConfig
-from src.core.schemas import PhoneNumberLLMOutput, CompanyContactDetails, ConsolidatedPhoneNumber, HomepageContextOutput, DomainExtractionBundle
+from src.core.schemas import (
+    PhoneNumberLLMOutput,
+    CompanyContactDetails,
+    ConsolidatedPhoneNumber,
+    ConsolidatedPhoneNumberSource,
+    HomepageContextOutput,
+    DomainExtractionBundle,
+)
 from src.phone_retrieval.data_handling.consolidator import get_canonical_base_url, process_and_consolidate_contact_data
 from src.phone_retrieval.extractors.llm_extractor import GeminiLLMExtractor
 from src.phone_retrieval.extractors.regex_extractor import extract_numbers_with_snippets_from_text
@@ -20,6 +29,325 @@ from src.phone_retrieval.processing.outcome_analyzer import determine_final_row_
 
 logger = logging.getLogger(__name__)
 
+def _safe_str_list(val: Any) -> List[str]:
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return [str(x) for x in val if str(x).strip()]
+    s = str(val).strip()
+    return [s] if s else []
+
+
+def _summarize_sources_for_number(n: ConsolidatedPhoneNumber) -> tuple[str, str]:
+    """Return (types_csv, source_urls_csv) for a ConsolidatedPhoneNumber."""
+    types = sorted({(s.type or "").strip() for s in (n.sources or []) if (s.type or "").strip()})
+    urls = sorted({(s.original_full_url or "").strip() for s in (n.sources or []) if (s.original_full_url or "").strip()})
+    return ", ".join(types), ", ".join(urls)
+
+
+def _role_score(role: str) -> int:
+    r = (role or "").strip().lower()
+    if not r:
+        return 0
+    high = ["ceo", "geschäftsführer", "geschaeftsfuehrer", "founder", "inhaber", "owner", "vorstand", "managing director"]
+    sales = ["vertrieb", "sales", "business development", "account", "kundenberater", "key account"]
+    tech = ["cto", "it", "technik", "engineering", "product", "produkt"]
+    hr = ["hr", "personal", "recruiting"]
+    if any(k in r for k in high):
+        return 100
+    if any(k in r for k in sales):
+        return 80
+    if any(k in r for k in tech):
+        return 50
+    if any(k in r for k in hr):
+        return 30
+    return 10
+
+
+def _extract_person_contacts(numbers: List[ConsolidatedPhoneNumber]) -> List[Dict[str, Any]]:
+    """Flatten person-associated sources into a list of contacts."""
+    out: List[Dict[str, Any]] = []
+    for n in numbers or []:
+        for s in (n.sources or []):
+            name = (getattr(s, "associated_person_name", None) or "").strip()
+            role = (getattr(s, "associated_person_role", None) or "").strip()
+            dept = (getattr(s, "associated_person_department", None) or "").strip()
+            is_dd = getattr(s, "is_direct_dial", None)
+            # Only treat as a "person contact" if we have an explicit person name OR an explicit direct-dial signal.
+            # This avoids incorrectly treating generic department labels as person-associated.
+            if not (name or is_dd is True):
+                continue
+            out.append(
+                {
+                    "name": name or None,
+                    "role": role or None,
+                    "department": dept or None,
+                    "number": n.number,
+                    "classification": n.classification,
+                    "type": getattr(s, "type", None),
+                    "source_url": getattr(s, "original_full_url", None),
+                    "is_direct_dial": is_dd,
+                }
+            )
+    seen = set()
+    uniq: List[Dict[str, Any]] = []
+    for c in out:
+        key = ((c.get("name") or "").lower(), (c.get("role") or "").lower(), (c.get("number") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(c)
+    return uniq
+
+
+def _pick_best_person_contact(contacts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not contacts:
+        return None
+
+    def score(c: Dict[str, Any]) -> int:
+        s = 0
+        if c.get("is_direct_dial") is True:
+            s += 40
+        s += _role_score(c.get("role") or "")
+        cls = (c.get("classification") or "").strip().lower()
+        if cls == "primary":
+            s += 20
+        elif cls == "secondary":
+            s += 10
+        return s
+
+    return sorted(contacts, key=score, reverse=True)[0]
+
+
+def _rank_consolidated_numbers_for_outreach(numbers: List[ConsolidatedPhoneNumber]) -> List[ConsolidatedPhoneNumber]:
+    """Rank consolidated numbers for operational calling (Top_Number_1..3)."""
+    if not numbers:
+        return []
+
+    def classification_score(cls: str) -> int:
+        c = (cls or "").strip().lower()
+        if c == "primary":
+            return 100
+        if c == "secondary":
+            return 80
+        if c:
+            return 50
+        return 0
+
+    def type_score(types_csv: str) -> int:
+        t = (types_csv or "").lower()
+        if "main" in t or "zentrale" in t or "headquarter" in t:
+            return 30
+        if "sales" in t or "vertrieb" in t:
+            return 20
+        if "support" in t or "service" in t:
+            return 10
+        if "fax" in t:
+            return -30
+        return 0
+
+    def person_bonus(n: ConsolidatedPhoneNumber) -> int:
+        bonus = 0
+        for s in (n.sources or []):
+            role = getattr(s, "associated_person_role", None) or ""
+            name = getattr(s, "associated_person_name", None) or ""
+            is_dd = getattr(s, "is_direct_dial", None)
+            # Only boost when we have an explicit person name or explicit direct-dial.
+            if not (name.strip() or is_dd is True):
+                continue
+            base = 20  # explicit person/direct-dial is already valuable
+            bonus = max(bonus, base + _role_score(role) + (40 if is_dd is True else 0))
+        return bonus
+
+    scored: List[tuple[int, ConsolidatedPhoneNumber]] = []
+    for n in numbers:
+        types_csv, _ = _summarize_sources_for_number(n)
+        s = classification_score(n.classification) + type_score(types_csv) + person_bonus(n)
+        scored.append((s, n))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [n for _s, n in scored]
+
+
+def _confidence_for_best(best: Optional[ConsolidatedPhoneNumber]) -> Optional[float]:
+    if not best:
+        return None
+    cls = (best.classification or "").strip().lower()
+    if cls == "primary":
+        return 0.9
+    if cls == "secondary":
+        return 0.75
+    if cls:
+        return 0.6
+    return None
+
+
+def _rank_and_cap_llm_candidates(items: List[Dict[str, Any]], app_config: AppConfig) -> List[Dict[str, Any]]:
+    """
+    Reduce LLM load by preferring high-signal candidates and capping the total.
+    Scoring heuristics:
+    - Prefer contact/impressum/legal/about paths
+    - Prefer snippets mentioning telephone keywords
+    - Prefer numbers that appear multiple times across pages
+    """
+    if not items:
+        return []
+    max_total = int(getattr(app_config, "phone_llm_max_candidates_total", 120) or 120)
+    prefer_paths = set((getattr(app_config, "phone_llm_prefer_url_path_keywords", []) or []))
+    prefer_snip = set((getattr(app_config, "phone_llm_prefer_snippet_keywords", []) or []))
+
+    # Count occurrences per candidate number.
+    counts: Counter = Counter()
+    for it in items:
+        num = (it.get("candidate_number") or it.get("number") or "").strip()
+        if num:
+            counts[num] += 1
+
+    def score(it: Dict[str, Any]) -> int:
+        num = (it.get("candidate_number") or it.get("number") or "").strip()
+        src = (it.get("source_url") or "").lower()
+        snip = (it.get("snippet") or "").lower()
+        s = 0
+        if prefer_paths and any(p in src for p in prefer_paths):
+            s += 100
+        if prefer_snip and any(k in snip for k in prefer_snip):
+            s += 30
+        if num:
+            s += min(50, int(counts.get(num, 1)) * 10)
+        return s
+
+    # De-dupe by (number, source_url) to avoid redundant items.
+    seen_pairs: Set[tuple] = set()
+    deduped: List[Dict[str, Any]] = []
+    for it in items:
+        num = (it.get("candidate_number") or it.get("number") or "").strip()
+        src = (it.get("source_url") or "").strip()
+        key = (num, src)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        deduped.append(it)
+
+    deduped.sort(key=score, reverse=True)
+    if max_total > 0:
+        deduped = deduped[:max_total]
+    return deduped
+
+
+def _phone_results_cache_path(true_base: str, app_config: AppConfig) -> str:
+    # Cache key derived from canonical base URL host; stable + filesystem-safe.
+    try:
+        parsed = urlparse(true_base)
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0]
+        host = re.sub(r"^www\\.", "", host)
+    except Exception:
+        host = true_base
+    safe = re.sub(r"[^\\w.-]", "_", host)[:80] or "unknown"
+    cache_dir = os.path.normpath(getattr(app_config, "phone_results_cache_dir", "cache/phone_results_cache") or "cache/phone_results_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"{safe}.json")
+
+
+def _load_phone_results_from_cache(true_base: str, app_config: AppConfig) -> Optional[DomainExtractionBundle]:
+    """
+    Load a cached, consolidated phone result for a canonical base domain.
+
+    This is an optional “resume accelerator” to avoid re-scrape / re-LLM work across runs.
+    Controlled by:
+    - `REUSE_PHONE_RESULTS_IF_AVAILABLE`
+    - `PHONE_RESULTS_CACHE_DIR`
+    """
+    try:
+        if not getattr(app_config, "reuse_phone_results_if_available", False):
+            return None
+        p = _phone_results_cache_path(true_base, app_config)
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            obj = json.load(f) or {}
+        nums = []
+        for it in (obj.get("consolidated_numbers") or []):
+            try:
+                sources = [
+                    ConsolidatedPhoneNumberSource(
+                        type=s.get("type") or "Unknown",
+                        source_path=s.get("source_path") or "",
+                        original_full_url=s.get("original_full_url") or "",
+                        original_input_company_name=s.get("original_input_company_name"),
+                    )
+                    for s in (it.get("sources") or [])
+                ]
+                nums.append(
+                    ConsolidatedPhoneNumber(
+                        number=it.get("number") or "",
+                        classification=it.get("classification") or "Unknown",
+                        sources=sources,
+                    )
+                )
+            except Exception:
+                continue
+        details = CompanyContactDetails(
+            company_name=obj.get("company_name"),
+            canonical_base_url=true_base,
+            consolidated_numbers=nums,
+            original_input_urls=obj.get("original_input_urls") or [],
+        )
+        homepage_ctx = obj.get("homepage_context")
+        hc = None
+        if isinstance(homepage_ctx, dict):
+            try:
+                hc = HomepageContextOutput(**homepage_ctx)
+            except Exception:
+                hc = None
+        return DomainExtractionBundle(company_contact_details=details, homepage_context=hc)
+    except Exception:
+        return None
+
+
+def _save_phone_results_to_cache(true_base: str, bundle: DomainExtractionBundle, app_config: AppConfig) -> None:
+    """
+    Persist consolidated phone results per canonical base domain (best-effort).
+
+    This cache is intentionally small and deterministic (1 file per domain) and is only used
+    when `REUSE_PHONE_RESULTS_IF_AVAILABLE=True`.
+    """
+    try:
+        p = _phone_results_cache_path(true_base, app_config)
+        details = bundle.company_contact_details
+        if not details:
+            return
+        nums_out = []
+        for n in (details.consolidated_numbers or []):
+            nums_out.append(
+                {
+                    "number": n.number,
+                    "classification": n.classification,
+                    "sources": [
+                        {
+                            "type": s.type,
+                            "source_path": s.source_path,
+                            "original_full_url": s.original_full_url,
+                            "original_input_company_name": s.original_input_company_name,
+                        }
+                        for s in (n.sources or [])
+                    ],
+                }
+            )
+        obj = {
+            "ts": datetime.now().isoformat(),
+            "company_name": details.company_name,
+            "canonical_base_url": details.canonical_base_url,
+            "original_input_urls": details.original_input_urls,
+            "consolidated_numbers": nums_out,
+            "homepage_context": (bundle.homepage_context.model_dump() if bundle.homepage_context and hasattr(bundle.homepage_context, "model_dump") else None),
+        }
+        tmp = f"{p}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except Exception:
+        return
+
+
 def execute_pipeline_flow(
     df: pd.DataFrame,
     app_config: AppConfig,
@@ -29,7 +357,9 @@ def execute_pipeline_flow(
     run_id: str,
     failure_writer: Any, # csv.writer object
     run_metrics: Dict[str, Any], # To be updated within this function
-    original_phone_col_name_for_profile: Optional[str] # Added
+    original_phone_col_name_for_profile: Optional[str], # Added
+    row_queue: Optional[Any] = None,
+    row_queue_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, List[Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, DomainExtractionBundle], Dict[str, str], Dict[str, List[str]], Dict[str, Optional[str]], Dict[str, int]]: # Updated CompanyContactDetails to DomainExtractionBundle
     """
     Executes the core data processing flow of the pipeline.
@@ -46,6 +376,12 @@ def execute_pipeline_flow(
     canonical_site_regex_candidates_found_status: Dict[str, bool] = {}
     # canonical_site_llm_exception_details: Stores specific LLM exception details per *pathful* canonical URL
     canonical_site_llm_exception_details: Dict[str, str] = {}
+    # canonical_site_regex_candidate_items: Stores regex candidate dicts per *pathful* canonical URL
+    canonical_site_regex_candidate_items: Dict[str, List[Dict[str, Any]]] = {}
+    # canonical_site_llm_context_paths: Stores context artifact paths per *pathful* canonical URL
+    canonical_site_llm_context_paths: Dict[str, List[str]] = {}
+    # optional domain-level phone-results cache hits (keyed by true_base)
+    cached_domain_bundles_by_true_base: Dict[str, DomainExtractionBundle] = {}
 
     # Variables for homepage context
     generated_homepage_context_for_domain: Optional[HomepageContextOutput] = None # For the current true_base_domain being processed in the loop
@@ -138,6 +474,19 @@ def execute_pipeline_flow(
             true_base_domain_for_row = get_canonical_base_url(final_canonical_entry_url) if final_canonical_entry_url else None
             df.at[index, 'CanonicalEntryURL'] = true_base_domain_for_row # This is the true_base
             current_row_scraper_status = scraper_status
+
+            # --- Optional: reuse cached consolidated phone results by canonical base ---
+            if true_base_domain_for_row and getattr(app_config, "reuse_phone_results_if_available", False):
+                if true_base_domain_for_row not in cached_domain_bundles_by_true_base:
+                    cached_bundle = _load_phone_results_from_cache(true_base_domain_for_row, app_config)
+                    if cached_bundle and cached_bundle.company_contact_details and (cached_bundle.company_contact_details.consolidated_numbers or []):
+                        cached_domain_bundles_by_true_base[true_base_domain_for_row] = cached_bundle
+                        # Mark this pathful as already "handled" so we don't do regex/LLM for it.
+                        if final_canonical_entry_url and final_canonical_entry_url not in canonical_site_raw_llm_outputs:
+                            canonical_site_raw_llm_outputs[final_canonical_entry_url] = []
+                            canonical_site_regex_candidates_found_status[final_canonical_entry_url] = False
+                            canonical_site_pathful_scraper_status[final_canonical_entry_url] = "Success_PhoneResultsCacheHit"
+                        logger.info(f"{log_identifier} Phone-results cache hit for {true_base_domain_for_row}; skipping regex/LLM extraction.")
 
             # --- Instrumentation: httpx fallback attempted/used/result for this row ---
             try:
@@ -297,7 +646,7 @@ def execute_pipeline_flow(
                                     filtered_page_candidates: List[Dict[str, str]] = []
                                     number_counts_on_page: Dict[str, int] = Counter()
                                     for candidate in page_candidate_items:
-                                        number_str = candidate.get('number')
+                                        number_str = candidate.get('number') or candidate.get('candidate_number')
                                         if number_str:
                                             if number_counts_on_page[number_str] < app_config.max_identical_numbers_per_page_to_llm:
                                                 filtered_page_candidates.append(candidate)
@@ -316,10 +665,12 @@ def execute_pipeline_flow(
                             run_metrics["regex_extraction_stats"]["sites_with_regex_candidates"] += 1 # Pathful site
                             run_metrics["regex_extraction_stats"]["total_regex_candidates_found"] += len(all_candidate_items_for_llm)
                             canonical_site_regex_candidates_found_status[final_canonical_entry_url] = True
+                            canonical_site_regex_candidate_items[final_canonical_entry_url] = list(all_candidate_items_for_llm)
                             if true_base_domain_for_row and true_base_domain_for_row in canonical_domain_journey_data:
                                 canonical_domain_journey_data[true_base_domain_for_row]["Regex_Candidates_Found_For_Any_Pathful"] = True
                         else:
                             canonical_site_regex_candidates_found_status[final_canonical_entry_url] = False
+                            canonical_site_regex_candidate_items[final_canonical_entry_url] = []
                         logger.info(f"{log_identifier} Found {len(all_candidate_items_for_llm)} regex candidates for LLM for {final_canonical_entry_url}.")
 
                     # LLM Processing for the current *pathful* canonical URL
@@ -342,8 +693,15 @@ def execute_pipeline_flow(
                                 # Log failure
                             else:
                                 safe_canonical_name = "".join(c if c.isalnum() else "_" for c in final_canonical_entry_url.replace("http://","").replace("https://",""))[:100]
+
+                                # Rank/dedupe/cap candidates before LLM to reduce cost and speed up runs.
+                                all_candidate_items_for_llm = _rank_and_cap_llm_candidates(all_candidate_items_for_llm, app_config)
+                                canonical_site_regex_candidate_items[final_canonical_entry_url] = list(all_candidate_items_for_llm)
+                                run_metrics["llm_processing_stats"]["total_llm_candidates_sent"] = run_metrics["llm_processing_stats"].get("total_llm_candidates_sent", 0) + len(all_candidate_items_for_llm)
+
                                 llm_input_filename = f"PATHFUL_{safe_canonical_name}_llm_input.json" # Clarify pathful
                                 llm_input_filepath = os.path.join(llm_context_dir, llm_input_filename)
+                                canonical_site_llm_context_paths.setdefault(final_canonical_entry_url, []).append(llm_input_filepath)
                                 try:
                                     with open(llm_input_filepath, 'w', encoding='utf-8') as f_in: json.dump(all_candidate_items_for_llm, f_in, indent=2)
                                 except IOError as e: logger.error(f"{log_identifier} IOError saving LLM input: {e}")
@@ -381,6 +739,7 @@ def execute_pipeline_flow(
 
                                 llm_raw_output_filename = f"PATHFUL_{safe_canonical_name}_llm_raw_output.json"
                                 llm_raw_output_filepath = os.path.join(llm_context_dir, llm_raw_output_filename)
+                                canonical_site_llm_context_paths.setdefault(final_canonical_entry_url, []).append(llm_raw_output_filepath)
                                 try:
                                     with open(llm_raw_output_filepath, 'w', encoding='utf-8') as f_llm_out:
                                         f_llm_out.write(llm_raw_response if isinstance(llm_raw_response, str) else json.dumps(llm_raw_response or {}, indent=2))
@@ -534,6 +893,14 @@ def execute_pipeline_flow(
     logger.info(f"Global Consolidation complete. {len(final_consolidated_data_by_true_base)} true base domains processed.")
     run_metrics["tasks"]["global_consolidation_duration_seconds"] = time.time() - global_consolidation_start_time
     run_metrics["data_processing_stats"]["unique_true_base_domains_consolidated"] = len(final_consolidated_data_by_true_base)
+
+    # Merge in any domain-level cache hits (skip regex/LLM runs entirely for those).
+    if cached_domain_bundles_by_true_base:
+        for tb, bundle in cached_domain_bundles_by_true_base.items():
+            if tb and tb not in final_consolidated_data_by_true_base:
+                final_consolidated_data_by_true_base[tb] = bundle
+                true_base_scraper_status.setdefault(tb, "Success_PhoneResultsCacheHit")
+                true_base_to_pathful_map.setdefault(tb, [])
     
     # Update total_successful_canonical_scrapes metric based on true_base_scraper_status
     successful_true_base_scrapes = sum(1 for status in true_base_scraper_status.values() if status == "Success")
@@ -623,12 +990,102 @@ def execute_pipeline_flow(
         df.at[index, 'Final_Row_Outcome_Reason'] = final_reason
         df.at[index, 'Determined_Fault_Category'] = fault_category
 
-        # Populate Top Numbers (simplified from main_pipeline)
-        if unique_sorted_consolidated_numbers:
-            for i, top_item in enumerate(unique_sorted_consolidated_numbers[:3]):
+        # Populate Top Numbers (operational call list)
+        ranked_for_outreach = _rank_consolidated_numbers_for_outreach(unique_sorted_consolidated_numbers)
+        if ranked_for_outreach:
+            for i, top_item in enumerate(ranked_for_outreach[:3]):
                 df.at[index, f'Top_Number_{i+1}'] = top_item.number
                 df.at[index, f'Top_Type_{i+1}'] = ", ".join(sorted(list(set(s.type for s in top_item.sources if s.type))))
                 df.at[index, f'Top_SourceURL_{i+1}'] = ", ".join(sorted(list(set(s.original_full_url for s in top_item.sources))))
+
+        # Populate Primary_/Secondary_ legacy columns from consolidated numbers.
+        primary_items = [n for n in unique_sorted_consolidated_numbers if (n.classification or "").strip() == "Primary"]
+        secondary_items = [n for n in unique_sorted_consolidated_numbers if (n.classification or "").strip() == "Secondary"]
+        if primary_items:
+            types_csv, urls_csv = _summarize_sources_for_number(primary_items[0])
+            df.at[index, "Primary_Number_1"] = primary_items[0].number
+            df.at[index, "Primary_Type_1"] = types_csv
+            df.at[index, "Primary_SourceURL_1"] = urls_csv
+        if secondary_items:
+            types_csv, urls_csv = _summarize_sources_for_number(secondary_items[0])
+            df.at[index, "Secondary_Number_1"] = secondary_items[0].number
+            df.at[index, "Secondary_Type_1"] = types_csv
+            df.at[index, "Secondary_SourceURL_1"] = urls_csv
+        if len(secondary_items) > 1:
+            types_csv, urls_csv = _summarize_sources_for_number(secondary_items[1])
+            df.at[index, "Secondary_Number_2"] = secondary_items[1].number
+            df.at[index, "Secondary_Type_2"] = types_csv
+            df.at[index, "Secondary_SourceURL_2"] = urls_csv
+
+        # Populate debug/trace fields for this row by aggregating across its pathful URLs.
+        pathfuls = true_base_to_pathful_map.get(str(canonical_url_summary), []) if canonical_url_summary else []
+        all_regex_items: List[Dict[str, Any]] = []
+        for p in pathfuls:
+            all_regex_items.extend(canonical_site_regex_candidate_items.get(p, []) or [])
+        df.at[index, "RegexCandidateSnippets"] = all_regex_items
+
+        # Collect LLM extracted outputs (raw) across pathfuls.
+        llm_items: List[Dict[str, Any]] = []
+        for p in pathfuls:
+            outs = canonical_site_raw_llm_outputs.get(p, []) or []
+            for o in outs:
+                try:
+                    llm_items.append(o.model_dump() if hasattr(o, "model_dump") else dict(o))  # pydantic v2 / dict-like
+                except Exception:
+                    try:
+                        llm_items.append({"number": getattr(o, "number", None), "type": getattr(o, "type", None),
+                                          "classification": getattr(o, "classification", None), "is_valid": getattr(o, "is_valid", None),
+                                          "source_url": getattr(o, "source_url", None)})
+                    except Exception:
+                        pass
+        df.at[index, "LLMExtractedNumbers"] = llm_items
+
+        best_numbers = [str(df.at[index, f"Top_Number_{i}"]).strip() for i in (1, 2, 3)
+                        if f"Top_Number_{i}" in df.columns and df.at[index, f"Top_Number_{i}"] not in (None, "", "nan", "NaN")]
+        df.at[index, "BestMatchedPhoneNumbers"] = best_numbers
+        other_nums = [n.number for n in unique_sorted_consolidated_numbers if n.number not in set(best_numbers)]
+        df.at[index, "OtherRelevantNumbers"] = other_nums
+
+        # Attach context artifact paths where available.
+        ctx_paths: List[str] = []
+        for p in pathfuls:
+            ctx_paths.extend(canonical_site_llm_context_paths.get(p, []) or [])
+        # De-dupe while preserving order
+        seen = set()
+        ctx_paths = [x for x in ctx_paths if x and not (x in seen or seen.add(x))]
+        df.at[index, "LLMContextPath"] = "; ".join(ctx_paths)
+
+        # Simple confidence heuristic based on the best consolidated number classification.
+        best_obj = unique_sorted_consolidated_numbers[0] if unique_sorted_consolidated_numbers else None
+        df.at[index, "ConfidenceScore"] = _confidence_for_best(best_obj)
+
+        # Person-associated contacts (optional)
+        contacts = _extract_person_contacts(unique_sorted_consolidated_numbers)
+        df.at[index, "PersonContacts"] = contacts
+        best_contact = _pick_best_person_contact(contacts)
+        if best_contact:
+            df.at[index, "BestPersonContactName"] = best_contact.get("name")
+            df.at[index, "BestPersonContactRole"] = best_contact.get("role")
+            df.at[index, "BestPersonContactDepartment"] = best_contact.get("department")
+            df.at[index, "BestPersonContactNumber"] = best_contact.get("number")
+
+        # --- Live streaming to master (optional) ---
+        if row_queue is not None:
+            try:
+                payload = df.loc[index].to_dict()
+                if row_queue_meta:
+                    payload.update({f"__meta_{k}": v for k, v in row_queue_meta.items()})
+                row_queue.put(
+                    {
+                        "type": "row",
+                        "run_id": run_id,
+                        "ts": datetime.now().isoformat(),
+                        "data": payload,
+                    }
+                )
+            except Exception:
+                # Best effort only; do not kill the worker.
+                pass
         
         # Attrition data population (simplified, assumes duplicate counts are handled if needed by report)
         if final_reason != "Contact_Successfully_Extracted":
@@ -658,6 +1115,20 @@ def execute_pipeline_flow(
         df.drop(columns=['temp_derived_input_canonical'], inplace=True)
 
     logger.info("Final row outcome determination complete.")
+
+    # Persist consolidated phone results to cache (best-effort).
+    try:
+        cache_dir = getattr(app_config, "phone_results_cache_dir", None)
+        if cache_dir:
+            os.makedirs(os.path.normpath(cache_dir), exist_ok=True)
+            for tb, bundle in final_consolidated_data_by_true_base.items():
+                if not tb or not bundle or not bundle.company_contact_details:
+                    continue
+                if not (bundle.company_contact_details.consolidated_numbers or []):
+                    continue
+                _save_phone_results_to_cache(tb, bundle, app_config)
+    except Exception:
+        pass
     
     return (
         df, 

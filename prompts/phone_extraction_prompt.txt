@@ -14,6 +14,15 @@ You are an expert data extractor. Your task is to analyze text snippets from a G
     *   **"Secondary"**: The number is for a specific, non-primary purpose (e.g., a direct dial for a specific person, a secondary support line).
     *   **"Non-Business"**: The number is clearly not for business contact (e.g., a private number mentioned in a blog post).
 
+4.  **Person association (optional but important)**:
+    Only populate these fields when the snippet clearly links the number to a **specific person** (e.g., "Max Mustermann (CEO) +49...") or explicitly indicates a **direct dial** ("Durchwahl", "Direct Dial", "Ext.").
+    Do **NOT** use these fields for generic department/queue lines (e.g., "Sales", "Support", "Vertrieb") unless a specific person is named.
+    *   Set `associated_person_name` (e.g., "Max Mustermann") when present.
+    *   Set `associated_person_role` (e.g., "CEO", "Geschäftsführer") when present.
+    *   Optionally set `associated_person_department` (e.g., "Sales", "HR") when present.
+    *   Set `is_direct_dial=true` when it appears to be a direct dial to an individual.
+    If not clearly person-linked/direct-dial, leave these as null.
+
 **Input Snippets:**
 A JSON list of potential numbers and the text surrounding them.
 ---
@@ -29,7 +38,11 @@ Respond with a JSON object containing a single key "extracted_numbers" which hol
             "source_url": "The URL where the number was found",
             "is_valid": true/false,
             "type": "e.g., Sales",
-            "classification": "e.g., Primary"
+            "classification": "e.g., Primary",
+            "associated_person_name": "Optional person name (or null)",
+            "associated_person_role": "Optional person role/title (or null)",
+            "associated_person_department": "Optional department (or null)",
+            "is_direct_dial": true/false (or null)
         }}
     ]
 }}
@@ -50,21 +63,33 @@ Die Exxomove GmbH ist ein führendes Logistikunternehmen, das umfassende Transpo
             "source_url": "https://www.exxomove.de/",
             "is_valid": true,
             "type": "Main Office",
-            "classification": "Primary"
+            "classification": "Primary",
+            "associated_person_name": null,
+            "associated_person_role": null,
+            "associated_person_department": null,
+            "is_direct_dial": null
         }},
         {{
             "number": "+49 (0) 123 456-7891",
             "source_url": "https://www.exxomove.de/",
             "is_valid": true,
             "type": "Sales",
-            "classification": "Secondary"
+            "classification": "Secondary",
+            "associated_person_name": null,
+            "associated_person_role": null,
+            "associated_person_department": null,
+            "is_direct_dial": null
         }},
         {{
             "number": "+49 (0) 123 456-7892",
             "source_url": "https://www.exxomove.de/",
             "is_valid": true,
             "type": "Fax",
-            "classification": "Secondary"
+            "classification": "Secondary",
+            "associated_person_name": null,
+            "associated_person_role": null,
+            "associated_person_department": null,
+            "is_direct_dial": null
         }}
     ]
 }}

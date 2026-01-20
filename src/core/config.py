@@ -527,6 +527,20 @@ class AppConfig:
         self.scraped_content_cache_dirs: List[str] = [p.strip() for p in raw_cache_dirs.split(',') if p.strip()]
         self.scraped_content_cache_min_chars: int = int(os.getenv('SCRAPED_CONTENT_CACHE_MIN_CHARS', '500'))
 
+        # --- Phone Extraction Quality/Cost Controls ---
+        # Limit how many regex candidates we send into the phone-extraction LLM per canonical (pathful) URL.
+        self.phone_llm_max_candidates_total: int = int(os.getenv("PHONE_LLM_MAX_CANDIDATES_TOTAL", "120"))
+        prefer_paths = os.getenv("PHONE_LLM_PREFER_URL_PATH_KEYWORDS", "kontakt,contact,impressum,legal,about,ueber,über")
+        self.phone_llm_prefer_url_path_keywords: List[str] = [p.strip().lower() for p in prefer_paths.replace(";", ",").split(",") if p.strip()]
+        prefer_snip = os.getenv("PHONE_LLM_PREFER_SNIPPET_KEYWORDS", "tel,telefon,phone,zentrale,hotline,call,service,vertrieb,sales")
+        self.phone_llm_prefer_snippet_keywords: List[str] = [p.strip().lower() for p in prefer_snip.replace(";", ",").split(",") if p.strip()]
+
+        # Deterministic phone-results caching (optional): reuse consolidated phone results per canonical base domain
+        # to avoid re-scrape/re-LLM across resume runs.
+        self.reuse_phone_results_if_available: bool = os.getenv("REUSE_PHONE_RESULTS_IF_AVAILABLE", "False").lower() == "true"
+        # Use an env override when provided; otherwise default to a stable local folder (not dependent on output_base_dir init order).
+        self.phone_results_cache_dir: str = os.path.normpath(os.getenv("PHONE_RESULTS_CACHE_DIR", "cache/phone_results_cache"))
+
         # --- Data Handling & Input Profiling ---
         self.input_excel_file_path: str = input_file_override or os.getenv('INPUT_EXCEL_FILE_PATH', 'data_to_be_inputed.xlsx')  # Relative to project root
         self.input_file_profile_name: str = os.getenv("INPUT_FILE_PROFILE_NAME", "default")

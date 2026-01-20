@@ -13,6 +13,7 @@ from src.core.schemas import (
     ConsolidatedPhoneNumber,
     CompanyContactDetails
 )
+from src.phone_retrieval.data_handling.normalizer import normalize_phone_number
 
 # Configure logging
 try:
@@ -167,6 +168,14 @@ def process_and_consolidate_contact_data(
             logger.warning(f"Skipping LLM item for {company_name_from_input or initial_given_url} (Canonical: {canonical_base}) due to missing number or source_url: {llm_item}")
             skipped_malformed_count += 1
             continue
+
+        raw_number = str(llm_item.number).strip()
+        if not raw_number:
+            skipped_malformed_count += 1
+            continue
+        # Normalize to E.164 when possible so different representations consolidate cleanly.
+        norm = normalize_phone_number(raw_number, region=None)
+        number_key = norm if norm and norm != "InvalidFormat" else raw_number
         
         all_original_source_urls_for_this_company.add(llm_item.source_url)
 
@@ -182,17 +191,22 @@ def process_and_consolidate_contact_data(
             type=llm_item.type,
             source_path=source_path,
             original_full_url=llm_item.source_url,
+            original_input_company_name=getattr(llm_item, "original_input_company_name", None),
+            associated_person_name=getattr(llm_item, "associated_person_name", None),
+            associated_person_role=getattr(llm_item, "associated_person_role", None),
+            associated_person_department=getattr(llm_item, "associated_person_department", None),
+            is_direct_dial=getattr(llm_item, "is_direct_dial", None),
         )
 
-        if llm_item.number not in consolidated_numbers_map:
-            consolidated_numbers_map[llm_item.number] = ConsolidatedPhoneNumber(
-                number=llm_item.number,
+        if number_key not in consolidated_numbers_map:
+            consolidated_numbers_map[number_key] = ConsolidatedPhoneNumber(
+                number=number_key,
                 classification=llm_item.classification, # Initial classification
                 sources=[current_number_info]
             )
         else:
             # Number already seen, add this new source and update classification if higher priority
-            existing_consolidated_number = consolidated_numbers_map[llm_item.number]
+            existing_consolidated_number = consolidated_numbers_map[number_key]
             is_duplicate_source = False
             for existing_source in existing_consolidated_number.sources:
                 if existing_source.original_full_url == current_number_info.original_full_url and \

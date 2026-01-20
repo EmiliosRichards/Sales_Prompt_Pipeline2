@@ -186,6 +186,16 @@ def initialize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
         'LLMExtractedNumbers': lambda: [[] for _ in range(df_length)], 
         'LLMContextPath': '', 
         'Notes': '',
+        # Legacy + compatibility fields (some inputs/outputs expect these names).
+        'Primary_Number_1': None, 'Primary_Type_1': None, 'Primary_SourceURL_1': None,
+        'Secondary_Number_1': None, 'Secondary_Type_1': None, 'Secondary_SourceURL_1': None,
+        'Secondary_Number_2': None, 'Secondary_Type_2': None, 'Secondary_SourceURL_2': None,
+        # Person-associated contact info (optional; populated when the phone LLM links a number to a person/role).
+        'BestPersonContactName': None,
+        'BestPersonContactRole': None,
+        'BestPersonContactDepartment': None,
+        'BestPersonContactNumber': None,
+        'PersonContacts': lambda: [[] for _ in range(df_length)],
         'Top_Number_1': None, 'Top_Type_1': None, 'Top_SourceURL_1': None,
         'Top_Number_2': None, 'Top_Type_2': None, 'Top_SourceURL_2': None,
         'Top_Number_3': None, 'Top_Type_3': None, 'Top_SourceURL_3': None,

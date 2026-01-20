@@ -47,6 +47,11 @@ class PhoneNumberLLMOutput(BaseModel):
     is_mobile: Optional[bool] = Field(default=None, description="Whether the number is a mobile phone.")
     original_input_number: Optional[str] = Field(default=None, description="The original number string before any normalization.")
     snippet: Optional[str] = Field(default=None, description="A text snippet from the source page providing context for the number.")
+    # Optional person association (useful when the number appears next to a specific person/role).
+    associated_person_name: Optional[str] = Field(default=None, description="Person name associated with the number (if clearly present in context).")
+    associated_person_role: Optional[str] = Field(default=None, description="Person role/title associated with the number (if clearly present in context).")
+    associated_person_department: Optional[str] = Field(default=None, description="Person department/team associated with the number (if clearly present in context).")
+    is_direct_dial: Optional[bool] = Field(default=None, description="True when the number appears to be a direct dial for an individual rather than a generic switchboard.")
 
 class ConsolidatedPhoneNumberSource(BaseModel):
     """
@@ -57,6 +62,11 @@ class ConsolidatedPhoneNumberSource(BaseModel):
     source_path: str = Field(description="The path or specific part of the URL where this number type was identified (e.g., '/contact', '/about/locations/berlin').")
     original_full_url: str = Field(description="The original full URL from which this number was extracted.")
     original_input_company_name: Optional[str] = Field(default=None, description="Original input company name associated with this specific source.")
+    # Optional person association propagated from LLM classification (when available).
+    associated_person_name: Optional[str] = Field(default=None, description="Person name associated with this source (if known).")
+    associated_person_role: Optional[str] = Field(default=None, description="Person role/title associated with this source (if known).")
+    associated_person_department: Optional[str] = Field(default=None, description="Person department/team associated with this source (if known).")
+    is_direct_dial: Optional[bool] = Field(default=None, description="True when this source indicates the number is a direct dial.")
 
 class ConsolidatedPhoneNumber(BaseModel):
     """

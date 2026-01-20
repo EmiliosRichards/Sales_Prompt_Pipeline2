@@ -1,11 +1,32 @@
+"""
+Phone-only pipeline entrypoint: scrape → regex candidates → phone LLM classify → consolidate → write outputs.
+
+Key design points:
+- Supports `--workers` on Windows via `ProcessPoolExecutor` + `multiprocessing.Manager().Queue()` to stream
+  per-row results back to a single master writer (no concurrent file writes).
+- Always produces **live** outputs (`*_live.csv`, `*_live.jsonl`, `*_live_status.json`) so you can monitor progress.
+- Also copies live outputs into stable final outputs after completion.
+- When input is CSV, the augmented CSV preserves the input delimiter (Apollo exports are often `;`).
+
+See:
+- `docs/SYSTEM_OVERVIEW.md`
+- `docs/OUTPUT_FILES.md`
+- `docs/PHONE_NUMBER_FIELDS.md`
+"""
+
 import argparse
 import csv
+import json
 import logging
 import os
 import time
+import queue as pyqueue
+import threading
+import multiprocessing as mp
+from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any, Dict
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -134,7 +155,11 @@ class WorkerJob:
 
 
 def _run_worker(job: WorkerJob) -> str:
-    """Process a slice of rows and return the path to that worker's results CSV."""
+    """
+    Process a slice of rows in-process and return the path to that worker's results CSV.
+
+    This path is used both in single-worker mode and as a worker sub-task in `--workers` mode.
+    """
     pipeline_start_time = time.time()
 
     app_config = AppConfig(
@@ -189,6 +214,14 @@ def _run_worker(job: WorkerJob) -> str:
 
         output_path = os.path.join(run_output_dir, f"phone_extraction_results_{job.run_id}.csv")
         df_processed.to_csv(output_path, index=False, encoding="utf-8")
+        # JSONL companion (one object per row) for downstream tooling.
+        try:
+            jsonl_path = os.path.splitext(output_path)[0] + ".jsonl"
+            with open(jsonl_path, "w", encoding="utf-8") as f:
+                for _, r in df_processed.iterrows():
+                    f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+        except Exception:
+            pass
     finally:
         if failure_log_file_handle:
             try:
@@ -208,6 +241,325 @@ def _run_worker(job: WorkerJob) -> str:
     )
 
     return output_path
+
+
+def _parse_start_1based(row_range: str) -> int:
+    rr = (row_range or "").strip()
+    if not rr:
+        return 1
+    if "-" in rr:
+        a = rr.split("-", 1)[0].strip()
+        return int(a) if a.isdigit() else 1
+    return 1
+
+
+def _run_worker_streaming(job: WorkerJob, queue_obj: Any) -> str:
+    """
+    Worker wrapper used in `--workers` mode.
+
+    Streams finalized per-row outputs to the master writer via `queue_obj`.
+    The master writer is responsible for writing `*_live.csv` + `*_live.jsonl`.
+    """
+    try:
+        queue_obj.put({"type": "job_start", "job_id": job.run_id, "row_range": job.row_range, "ts": datetime.now().isoformat()})
+    except Exception:
+        pass
+
+    pipeline_start_time = time.time()
+    app_cfg = AppConfig(
+        input_file_override=job.input_file,
+        row_range_override=job.row_range or None,
+        run_id_suffix_override=job.suffix,
+        test_mode=False,
+    )
+    app_cfg.input_file_profile_name = job.input_profile
+    app_cfg.log_level = job.log_level
+    app_cfg.console_log_level = job.console_log_level
+    app_cfg.output_base_dir = job.output_base_dir
+
+    run_metrics = initialize_run_metrics(job.run_id)
+    run_output_dir_w, llm_context_dir_w = _setup_run_dirs(app_cfg, job.run_id)
+    log_file_path_w = os.path.join(run_output_dir_w, f"phone_extract_{job.run_id}.log")
+    file_log_level_int = getattr(logging, app_cfg.log_level.upper(), logging.INFO)
+    console_log_level_int = getattr(logging, app_cfg.console_log_level.upper(), logging.WARNING)
+    setup_logging(file_log_level=file_log_level_int, console_log_level=console_log_level_int, log_file_path=log_file_path_w)
+
+    df, original_phone_col_name, _ = load_and_preprocess_data(job.input_file, app_config_instance=app_cfg)
+    if df is None:
+        raise RuntimeError(f"[{job.run_id}] Failed to load input; DataFrame is None.")
+
+    # Attach absolute row number for stable ordering/debug (best-effort).
+    start_1based = _parse_start_1based(job.row_range)
+    df["__source_row_1based"] = list(range(int(start_1based), int(start_1based) + len(df)))
+
+    run_metrics["data_processing_stats"]["input_rows_count"] = len(df)
+    df = initialize_dataframe_columns(df)
+
+    failure_log_csv_path = os.path.join(run_output_dir_w, f"failed_rows_{job.run_id}.csv")
+    llm_extractor = GeminiLLMExtractor(config=app_cfg)
+    attrition_data_list = []
+    canonical_domain_journey_data = {}
+
+    with open(failure_log_csv_path, "w", newline="", encoding="utf-8") as fh_fail:
+        failure_writer = csv.writer(fh_fail)
+        _write_failure_header(failure_writer)
+        df_processed, attrition_data_list, canonical_domain_journey_data, *_ = execute_pipeline_flow(
+            df=df,
+            app_config=app_cfg,
+            llm_extractor=llm_extractor,
+            run_output_dir=run_output_dir_w,
+            llm_context_dir=llm_context_dir_w,
+            run_id=job.run_id,
+            failure_writer=failure_writer,
+            run_metrics=run_metrics,
+            original_phone_col_name_for_profile=original_phone_col_name,
+            row_queue=queue_obj,
+            row_queue_meta={"job_id": job.run_id, "row_range": job.row_range},
+        )
+
+    output_path = os.path.join(run_output_dir_w, f"phone_extraction_results_{job.run_id}.csv")
+    df_processed.to_csv(output_path, index=False, encoding="utf-8")
+
+    run_metrics["total_duration_seconds"] = time.time() - pipeline_start_time
+    write_run_metrics(
+        metrics=run_metrics,
+        output_dir=run_output_dir_w,
+        run_id=job.run_id,
+        pipeline_start_time=pipeline_start_time,
+        attrition_data_list_for_metrics=attrition_data_list,
+        canonical_domain_journey_data=canonical_domain_journey_data,
+        logger=logging.getLogger(__name__),
+    )
+    try:
+        queue_obj.put({"type": "job_done", "job_id": job.run_id, "row_range": job.row_range, "ts": datetime.now().isoformat()})
+    except Exception:
+        pass
+    return output_path
+
+
+def _write_status_json(path: str, status_obj: dict) -> None:
+    tmp = f"{path}.tmp"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(status_obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _stringify_for_csv(v: object) -> object:
+    if isinstance(v, (dict, list)):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    return v
+
+
+def _build_augmented_row_from_processed(
+    processed_row: dict,
+    input_header: List[str],
+    profile_mapping: dict,
+) -> dict:
+    """
+    Build an "augmented input" row:
+    - preserves the original input columns (input_header)
+    - adds enrichment columns from processed_row
+    """
+    out: dict = {}
+    # Fill original columns by mapping to canonical keys where needed.
+    for col in input_header:
+        if col in processed_row:
+            out[col] = processed_row.get(col)
+            continue
+        mapped = profile_mapping.get(col)
+        if mapped and mapped in processed_row:
+            out[col] = processed_row.get(mapped)
+        else:
+            out[col] = ""
+
+    # Append/overlay enrichment columns (keep them even if they didn't exist in the original input).
+    enrichment_keys = [
+        "PhoneNumber_Found",
+        "PhoneType_Found",
+        "PhoneSources_Found",
+        "PhoneExtract_Outcome",
+        "PhoneExtract_FaultCategory",
+        "HttpFallbackAttempted",
+        "HttpFallbackUsed",
+        "HttpFallbackResult",
+        # Rich phone retrieval diagnostics
+        "GivenPhoneNumber",
+        "NormalizedGivenPhoneNumber",
+        "ScrapingStatus",
+        "Overall_VerificationStatus",
+        "Original_Number_Status",
+        "Primary_Number_1", "Primary_Type_1", "Primary_SourceURL_1",
+        "Secondary_Number_1", "Secondary_Type_1", "Secondary_SourceURL_1",
+        "Secondary_Number_2", "Secondary_Type_2", "Secondary_SourceURL_2",
+        "RegexCandidateSnippets",
+        "BestMatchedPhoneNumbers",
+        "OtherRelevantNumbers",
+        "ConfidenceScore",
+        "LLMExtractedNumbers",
+        "LLMContextPath",
+        "Notes",
+        "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
+        "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
+        "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
+        "Final_Row_Outcome_Reason",
+        "Determined_Fault_Category",
+        "RunID",
+        "TargetCountryCodes",
+    ]
+
+    # Derive the old "PhoneNumber_Found/Type/Sources/Outcome/FaultCategory" fields if missing.
+    # This keeps compatibility with earlier augmented CSVs.
+    top1 = (processed_row.get("Top_Number_1") or "").strip() if isinstance(processed_row.get("Top_Number_1"), str) else processed_row.get("Top_Number_1")
+    if processed_row.get("PhoneNumber_Found") in (None, "", "nan", "NaN") and top1:
+        out["PhoneNumber_Found"] = top1
+    else:
+        out["PhoneNumber_Found"] = processed_row.get("PhoneNumber_Found", out.get("PhoneNumber_Found", ""))
+    out["PhoneType_Found"] = processed_row.get("PhoneType_Found", processed_row.get("Top_Type_1", ""))
+    out["PhoneSources_Found"] = processed_row.get("PhoneSources_Found", processed_row.get("Top_SourceURL_1", ""))
+    out["PhoneExtract_Outcome"] = processed_row.get("PhoneExtract_Outcome", processed_row.get("Final_Row_Outcome_Reason", ""))
+    out["PhoneExtract_FaultCategory"] = processed_row.get("PhoneExtract_FaultCategory", processed_row.get("Determined_Fault_Category", ""))
+    out["HttpFallbackAttempted"] = processed_row.get("HttpFallbackAttempted", "")
+    out["HttpFallbackUsed"] = processed_row.get("HttpFallbackUsed", "")
+    out["HttpFallbackResult"] = processed_row.get("HttpFallbackResult", "")
+
+    for k in enrichment_keys:
+        if k in out:
+            # Already set above
+            continue
+        out[k] = processed_row.get(k, "")
+
+    return out
+
+
+def _writer_thread_phone_extract(
+    queue_obj: object,
+    results_live_csv: str,
+    results_live_jsonl: str,
+    results_header: List[str],
+    augmented_live_csv: str,
+    augmented_live_jsonl: str,
+    augmented_header: List[str],
+    input_header: List[str],
+    profile_mapping: dict,
+    augmented_delimiter: str,
+    expected_jobs: int,
+    status_path: str,
+) -> None:
+    """
+    Master writer thread for phone_extract.
+
+    Receives messages from workers:
+    - job_start/job_done
+    - row (finalized row payload)
+    - stop
+
+    Writes:
+    - results live CSV/JSONL (comma-delimited)
+    - augmented live CSV/JSONL (delimiter matches input CSV)
+    - live status JSON
+    """
+    os.makedirs(os.path.dirname(results_live_csv), exist_ok=True)
+    with (
+        open(results_live_csv, "w", newline="", encoding="utf-8-sig") as f_csv,
+        open(results_live_jsonl, "w", encoding="utf-8") as f_jsonl,
+        open(augmented_live_csv, "w", newline="", encoding="utf-8-sig") as f_aug_csv,
+        open(augmented_live_jsonl, "w", encoding="utf-8") as f_aug_jsonl,
+    ):
+        res_w = csv.DictWriter(f_csv, fieldnames=results_header, extrasaction="ignore")
+        res_w.writeheader()
+        f_csv.flush()
+        aug_w = csv.DictWriter(f_aug_csv, fieldnames=augmented_header, extrasaction="ignore", delimiter=augmented_delimiter or ",")
+        aug_w.writeheader()
+        f_aug_csv.flush()
+
+        started = {}
+        done = {}
+        rows_written = 0
+        last_status_write = 0.0
+        stop_received = False
+        stop_received_ts: Optional[float] = None
+
+        def _emit_status(force: bool = False) -> None:
+            nonlocal last_status_write
+            now = time.time()
+            if (not force) and (now - last_status_write <= 2):
+                return
+            status_obj = {
+                "ts": datetime.now().isoformat(),
+                "rows_written": rows_written,
+                "jobs_expected": expected_jobs,
+                "jobs_started": len(started),
+                "jobs_done": len(done),
+                "jobs_in_flight": max(0, len(started) - len(done)),
+            }
+            try:
+                _write_status_json(status_path, status_obj)
+            except Exception:
+                pass
+            last_status_write = now
+
+        while True:
+            try:
+                msg = queue_obj.get(timeout=1)
+            except pyqueue.Empty:
+                if stop_received and len(done) >= expected_jobs:
+                    break
+                if stop_received and stop_received_ts and (time.time() - stop_received_ts) > 30:
+                    break
+                _emit_status()
+                continue
+
+            mtype = (msg or {}).get("type")
+            if mtype == "stop":
+                stop_received = True
+                stop_received_ts = time.time()
+                _emit_status(force=True)
+                continue
+            if mtype == "job_start":
+                jid = msg.get("job_id")
+                started[jid] = msg
+                _emit_status()
+                continue
+            if mtype == "job_done":
+                jid = msg.get("job_id")
+                done[jid] = msg
+                _emit_status(force=True)
+                continue
+            if mtype != "row":
+                continue
+
+            data = msg.get("data", {}) or {}
+            # Results CSV row (stringify complex types)
+            out_row = {}
+            for k in results_header:
+                out_row[k] = _stringify_for_csv(data.get(k, ""))
+            res_w.writerow(out_row)
+            f_csv.flush()
+            f_jsonl.write(json.dumps(data, ensure_ascii=False) + "\n")
+            f_jsonl.flush()
+
+            # Augmented row (preserve original input columns + enrich)
+            aug_obj = _build_augmented_row_from_processed(
+                processed_row=data,
+                input_header=input_header,
+                profile_mapping=profile_mapping,
+            )
+            aug_row = {}
+            for k in augmented_header:
+                aug_row[k] = _stringify_for_csv(aug_obj.get(k, ""))
+            aug_w.writerow(aug_row)
+            f_aug_csv.flush()
+            f_aug_jsonl.write(json.dumps(aug_obj, ensure_ascii=False) + "\n")
+            f_aug_jsonl.flush()
+
+            rows_written += 1
+            _emit_status()
+
+        _emit_status(force=True)
 
 
 def _infer_total_rows(input_path: str) -> int:
@@ -391,7 +743,45 @@ def _write_augmented_csv(
     original_slice["HttpFallbackUsed"] = [(_as_str_or_none(v) or "") for v in http_fb.tolist()]
     original_slice["HttpFallbackResult"] = [(_as_str_or_none(v) or "") for v in http_fb_result.tolist()]
 
+    # Also persist the richer phone-retrieval diagnostics + selected numbers so downstream
+    # full-pipeline / resume runs can reuse them without rerunning extraction.
+    passthrough_cols = [
+        "GivenPhoneNumber",
+        "NormalizedGivenPhoneNumber",
+        "ScrapingStatus",
+        "Overall_VerificationStatus",
+        "Original_Number_Status",
+        "Primary_Number_1", "Primary_Type_1", "Primary_SourceURL_1",
+        "Secondary_Number_1", "Secondary_Type_1", "Secondary_SourceURL_1",
+        "Secondary_Number_2", "Secondary_Type_2", "Secondary_SourceURL_2",
+        "RegexCandidateSnippets",
+        "BestMatchedPhoneNumbers",
+        "OtherRelevantNumbers",
+        "ConfidenceScore",
+        "LLMExtractedNumbers",
+        "LLMContextPath",
+        "Notes",
+        "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
+        "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
+        "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
+        "Final_Row_Outcome_Reason",
+        "Determined_Fault_Category",
+        "RunID",
+        "TargetCountryCodes",
+    ]
+    for c in passthrough_cols:
+        if c in processed_df.columns and c not in original_slice.columns:
+            original_slice[c] = processed_df[c].tolist()
+
     original_slice.to_csv(output_path, index=False, encoding="utf-8", sep=detected_sep)
+    # JSONL companion for easier downstream parsing.
+    try:
+        jsonl_path = os.path.splitext(output_path)[0] + ".jsonl"
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for _, r in original_slice.iterrows():
+                f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -427,7 +817,135 @@ def main() -> None:
         raise FileNotFoundError(f"Input file not found: {input_file_path_abs}")
 
     workers = max(1, int(args.workers or 1))
+
+    # Determine input header + profile mapping for consistent augmented output.
+    input_header: List[str] = []
+    if input_file_path_abs.lower().endswith(".csv"):
+        detected_sep = _detect_csv_delimiter(input_file_path_abs)
+        try:
+            input_header = list(pd.read_csv(input_file_path_abs, sep=detected_sep, nrows=0).columns)
+        except Exception:
+            input_header = []
+    elif input_file_path_abs.lower().endswith((".xls", ".xlsx")):
+        try:
+            input_header = list(pd.read_excel(input_file_path_abs, nrows=0).columns)
+        except Exception:
+            input_header = []
+
+    profile_mapping = (AppConfig.INPUT_COLUMN_PROFILES.get(app_config.input_file_profile_name) or {}).copy()
+    # Remove meta keys
+    profile_mapping = {k: v for k, v in profile_mapping.items() if not str(k).startswith("_")}
+
+    # Results header: original header with profile renames applied (+ extra required cols).
+    results_header = [profile_mapping.get(c, c) for c in input_header] if input_header else []
+    required_cols = [
+        "__source_row_1based",
+        "CompanyName",
+        "GivenURL",
+        "GivenPhoneNumber",
+        "NormalizedGivenPhoneNumber",
+        "ScrapingStatus",
+        "Overall_VerificationStatus",
+        "Original_Number_Status",
+        "Primary_Number_1", "Primary_Type_1", "Primary_SourceURL_1",
+        "Secondary_Number_1", "Secondary_Type_1", "Secondary_SourceURL_1",
+        "Secondary_Number_2", "Secondary_Type_2", "Secondary_SourceURL_2",
+        "RegexCandidateSnippets",
+        "BestMatchedPhoneNumbers",
+        "OtherRelevantNumbers",
+        "ConfidenceScore",
+        "LLMExtractedNumbers",
+        "LLMContextPath",
+        "Notes",
+        "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
+        "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
+        "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
+        "Final_Row_Outcome_Reason",
+        "Determined_Fault_Category",
+        "RunID",
+        "TargetCountryCodes",
+        "HttpFallbackAttempted",
+        "HttpFallbackUsed",
+        "HttpFallbackResult",
+    ]
+    seen = set()
+    results_header = [c for c in results_header if not (c in seen or seen.add(c))]
+    for c in required_cols:
+        if c not in seen:
+            results_header.append(c)
+            seen.add(c)
+
+    # Augmented header: original input columns + appended enrichment columns
+    augmented_header = list(input_header) if input_header else []
+    for c in [
+        "__source_row_1based",
+        "PhoneNumber_Found",
+        "PhoneType_Found",
+        "PhoneSources_Found",
+        "PhoneExtract_Outcome",
+        "PhoneExtract_FaultCategory",
+        "HttpFallbackAttempted",
+        "HttpFallbackUsed",
+        "HttpFallbackResult",
+        # Rich diagnostics (also include for convenience in augmented)
+        "GivenPhoneNumber",
+        "NormalizedGivenPhoneNumber",
+        "ScrapingStatus",
+        "Overall_VerificationStatus",
+        "Original_Number_Status",
+        "Primary_Number_1", "Primary_Type_1", "Primary_SourceURL_1",
+        "Secondary_Number_1", "Secondary_Type_1", "Secondary_SourceURL_1",
+        "Secondary_Number_2", "Secondary_Type_2", "Secondary_SourceURL_2",
+        "RegexCandidateSnippets",
+        "BestMatchedPhoneNumbers",
+        "OtherRelevantNumbers",
+        "ConfidenceScore",
+        "LLMExtractedNumbers",
+        "LLMContextPath",
+        "Notes",
+        "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
+        "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
+        "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
+        "Final_Row_Outcome_Reason",
+        "Determined_Fault_Category",
+        "RunID",
+        "TargetCountryCodes",
+    ]:
+        if c not in augmented_header:
+            augmented_header.append(c)
+
+    # Live output files (always)
+    live_results_csv = os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}_live.csv")
+    live_results_jsonl = os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}_live.jsonl")
+    live_aug_csv = os.path.join(run_output_dir, f"input_augmented_{master_run_id}_live.csv")
+    live_aug_jsonl = os.path.join(run_output_dir, f"input_augmented_{master_run_id}_live.jsonl")
+    live_status_path = os.path.join(run_output_dir, f"phone_extract_{master_run_id}_live_status.json")
+
+    augmented_delim = detected_sep if input_file_path_abs.lower().endswith(".csv") else ","
+
     if workers == 1:
+        q = pyqueue.Queue()
+        wt = threading.Thread(
+            target=_writer_thread_phone_extract,
+            kwargs=dict(
+                queue_obj=q,
+                results_live_csv=live_results_csv,
+                results_live_jsonl=live_results_jsonl,
+                results_header=results_header,
+                augmented_live_csv=live_aug_csv,
+                augmented_live_jsonl=live_aug_jsonl,
+                augmented_header=augmented_header,
+                input_header=input_header,
+                profile_mapping=profile_mapping,
+                augmented_delimiter=augmented_delim,
+                expected_jobs=1,
+                status_path=live_status_path,
+            ),
+            daemon=True,
+        )
+        wt.start()
+
+        # Run single worker but stream per-row to the writer thread.
         job = WorkerJob(
             input_file=input_file_path_abs,
             input_profile=app_config.input_file_profile_name,
@@ -438,8 +956,78 @@ def main() -> None:
             console_log_level=app_config.console_log_level,
             output_base_dir=app_config.output_base_dir,
         )
-        output_path = _run_worker(job)
+        try:
+            q.put({"type": "job_start", "job_id": job.run_id, "ts": datetime.now().isoformat()})
+        except Exception:
+            pass
+        # Run the worker inline but pass queue into execute_pipeline_flow by temporarily calling _run_worker and then replaying.
+        # For simplicity, re-run the pipeline here with streaming enabled.
+        pipeline_start_time = time.time()
+        app_config_single = AppConfig(
+            input_file_override=job.input_file,
+            row_range_override=job.row_range or None,
+            run_id_suffix_override=job.suffix,
+            test_mode=False,
+        )
+        app_config_single.input_file_profile_name = job.input_profile
+        app_config_single.log_level = job.log_level
+        app_config_single.console_log_level = job.console_log_level
+        app_config_single.output_base_dir = job.output_base_dir
+        run_metrics = initialize_run_metrics(job.run_id)
+        run_output_dir_single, llm_context_dir_single = _setup_run_dirs(app_config_single, job.run_id)
+        failure_log_csv_path = os.path.join(run_output_dir_single, f"failed_rows_{job.run_id}.csv")
+        llm_extractor = GeminiLLMExtractor(config=app_config_single)
+        df, original_phone_col_name, _ = load_and_preprocess_data(input_file_path_abs, app_config_instance=app_config_single)
+        if df is None:
+            raise RuntimeError(f"[{job.run_id}] Failed to load input; DataFrame is None.")
+        run_metrics["data_processing_stats"]["input_rows_count"] = len(df)
+        df = initialize_dataframe_columns(df)
+        with open(failure_log_csv_path, "w", newline="", encoding="utf-8") as fh_fail:
+            failure_writer = csv.writer(fh_fail)
+            _write_failure_header(failure_writer)
+            df_processed, attrition_data_list, canonical_domain_journey_data, *_ = execute_pipeline_flow(
+                df=df,
+                app_config=app_config_single,
+                llm_extractor=llm_extractor,
+                run_output_dir=run_output_dir_single,
+                llm_context_dir=llm_context_dir_single,
+                run_id=job.run_id,
+                failure_writer=failure_writer,
+                run_metrics=run_metrics,
+                original_phone_col_name_for_profile=original_phone_col_name,
+                row_queue=q,
+                row_queue_meta={"job_id": job.run_id},
+            )
+        output_path = os.path.join(run_output_dir_single, f"phone_extraction_results_{job.run_id}.csv")
+        df_processed.to_csv(output_path, index=False, encoding="utf-8")
         logger.info(f"Wrote phone extraction results CSV: {output_path}")
+        run_metrics["total_duration_seconds"] = time.time() - pipeline_start_time
+        write_run_metrics(
+            metrics=run_metrics,
+            output_dir=run_output_dir_single,
+            run_id=job.run_id,
+            pipeline_start_time=pipeline_start_time,
+            attrition_data_list_for_metrics=attrition_data_list,
+            canonical_domain_journey_data=canonical_domain_journey_data,
+            logger=logging.getLogger(__name__),
+        )
+        try:
+            q.put({"type": "job_done", "job_id": job.run_id, "ts": datetime.now().isoformat()})
+            q.put({"type": "stop"})
+        except Exception:
+            pass
+        wt.join(timeout=60)
+
+        # Copy live outputs to stable final copies
+        try:
+            import shutil
+            shutil.copyfile(live_results_csv, os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.csv"))
+            shutil.copyfile(live_results_jsonl, os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.jsonl"))
+            shutil.copyfile(live_aug_csv, os.path.join(run_output_dir, f"input_augmented_{master_run_id}.csv"))
+            shutil.copyfile(live_aug_jsonl, os.path.join(run_output_dir, f"input_augmented_{master_run_id}.jsonl"))
+        except Exception:
+            pass
+
         # Also write an "augmented input" CSV for CSV inputs.
         total_rows = _infer_total_rows(input_file_path_abs)
         start_1based, _ = _parse_range_bounds(args.range or "", total_rows=total_rows)
@@ -476,17 +1064,56 @@ def main() -> None:
             )
         )
 
+    # Live streaming writer (master)
+    mgr = mp.Manager()
+    q = mgr.Queue()
+    wt = threading.Thread(
+        target=_writer_thread_phone_extract,
+        kwargs=dict(
+            queue_obj=q,
+            results_live_csv=live_results_csv,
+            results_live_jsonl=live_results_jsonl,
+            results_header=results_header,
+            augmented_live_csv=live_aug_csv,
+            augmented_live_jsonl=live_aug_jsonl,
+            augmented_header=augmented_header,
+            input_header=input_header,
+            profile_mapping=profile_mapping,
+            augmented_delimiter=augmented_delim,
+            expected_jobs=len(jobs),
+            status_path=live_status_path,
+        ),
+        daemon=True,
+    )
+    wt.start()
+
     worker_outputs: List[str] = []
     with ProcessPoolExecutor(max_workers=workers) as ex:
         futures = {}
         for job in jobs:
             logger.info(f"Worker start: {job.run_id} range={job.row_range}")
-            futures[ex.submit(_run_worker, job)] = job
+            futures[ex.submit(_run_worker_streaming, job, q)] = job
         for fut in as_completed(futures):
             job = futures[fut]
             out_path = fut.result()
             logger.info(f"Worker complete: {job.run_id} range={job.row_range} -> {out_path}")
             worker_outputs.append(out_path)
+
+    try:
+        q.put({"type": "stop"})
+    except Exception:
+        pass
+    wt.join(timeout=120)
+
+    # Copy live outputs to stable final copies
+    try:
+        import shutil
+        shutil.copyfile(live_results_csv, os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.csv"))
+        shutil.copyfile(live_results_jsonl, os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.jsonl"))
+        shutil.copyfile(live_aug_csv, os.path.join(run_output_dir, f"input_augmented_{master_run_id}.csv"))
+        shutil.copyfile(live_aug_jsonl, os.path.join(run_output_dir, f"input_augmented_{master_run_id}.jsonl"))
+    except Exception:
+        pass
 
     # Merge outputs into a single CSV under the master run dir
     # IMPORTANT: preserve the original row order. Worker outputs must be concatenated in chunk order
@@ -528,6 +1155,14 @@ def main() -> None:
         run_output_dir, f"phone_extraction_results_{master_run_id}_merged.csv"
     )
     merged_df.to_csv(merged_output_path, index=False, encoding="utf-8")
+    # JSONL companion for merged results.
+    try:
+        jsonl_path = os.path.splitext(merged_output_path)[0] + ".jsonl"
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for _, r in merged_df.iterrows():
+                f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     logger.info(f"Merged output written: {merged_output_path}")
 
     # Also write augmented CSV for the processed slice (CSV inputs only).
