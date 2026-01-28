@@ -380,16 +380,41 @@ def run_parallel_full_pipeline(
     )
     header_probe_cfg.input_file_profile_name = input_profile
     df_head = load_and_preprocess_data(input_file_path_abs, app_config_instance=header_probe_cfg)
+    # Ensure our live/final outputs have the same "standard" columns as the single-process flow.
+    # This includes phone extraction/ranking columns (Top_*, MainOffice_*, LLMPhoneRanking*, etc.)
+    # even when the input file doesn't already contain them.
+    if df_head is not None:
+        try:
+            df_head = initialize_dataframe_columns(df_head)
+        except Exception:
+            pass
     base_cols = list(df_head.columns) if df_head is not None else []
 
     extra_cols = [
-        'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status', 'is_b2b', 'serves_1000',
-        'is_b2b_reason', 'serves_1000_reason', 'description', 'Industry',
+        'CanonicalEntryURL',
+        # Keep these in the SalesOutreachReport outputs (even when phone retrieval is skipped),
+        # since they are part of the sales workflow / pitch gating.
+        'found_number', 'PhoneNumber_Status',
+        'is_b2b', 'serves_1000',
+        'is_b2b_reason', 'serves_1000_reason', 'Short German Description', 'Industry',
         'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
         'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
         'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
         'Target Group Size Assessment', 'sales_pitch', 'matched_golden_partner',
         'match_reasoning', 'Matched Partner Description', 'Avg Leads Per Day', 'Rank',
+        # Person-associated contact fields (optional; populated by phone extraction when present)
+        'BestPersonContactName', 'BestPersonContactRole', 'BestPersonContactDepartment', 'BestPersonContactNumber',
+        'PersonContacts',
+        # Main office / switchboard backup + LLM ranking trace
+        'MainOffice_Number', 'MainOffice_Type', 'MainOffice_SourceURL',
+        'LLMPhoneRanking',
+        'LLMPhoneRankingError',
+        'DeprioritizedNumbers',
+        'SuspectedOtherOrgNumbers',
+        # Top callable numbers (LLM-ranked when phone retrieval ran)
+        'Top_Number_1', 'Top_Type_1', 'Top_SourceURL_1',
+        'Top_Number_2', 'Top_Type_2', 'Top_SourceURL_2',
+        'Top_Number_3', 'Top_Type_3', 'Top_SourceURL_3',
         '__meta_job_id', '__meta_row_range', '__meta_global_row_start_1based',
     ]
 
@@ -403,18 +428,39 @@ def run_parallel_full_pipeline(
         header.append(col)
 
     augmented_extra_cols = [
-        'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status',
-        'description', 'Industry',
+        'CanonicalEntryURL',
+        'found_number', 'PhoneNumber_Status',
+        'Short German Description', 'Industry',
         'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
         'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
         'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
         'Target Group Size Assessment',
         'matched_golden_partner', 'match_reasoning',
         'sales_pitch',
+        # Person-associated contact fields (optional)
+        'BestPersonContactName', 'BestPersonContactRole', 'BestPersonContactDepartment', 'BestPersonContactNumber',
+        'PersonContacts',
+        # Main office / switchboard backup + LLM ranking trace
+        'MainOffice_Number', 'MainOffice_Type', 'MainOffice_SourceURL',
+        'LLMPhoneRanking',
+        'LLMPhoneRankingError',
+        'DeprioritizedNumbers',
+        'SuspectedOtherOrgNumbers',
+        # Top callable numbers (LLM-ranked when phone retrieval ran)
+        'Top_Number_1', 'Top_Type_1', 'Top_SourceURL_1',
+        'Top_Number_2', 'Top_Type_2', 'Top_SourceURL_2',
+        'Top_Number_3', 'Top_Type_3', 'Top_SourceURL_3',
     ]
+    # If phone retrieval is skipped, don't introduce the full pipeline's own phone summary columns
+    # into the augmented-input output (keep phone_extract outputs "as-is" while appending sales columns).
+    if not bool(getattr(app_config, "enable_phone_retrieval_in_full_pipeline", True)) and not bool(getattr(app_config, "force_phone_extraction", False)):
+        augmented_extra_cols = [c for c in augmented_extra_cols if c not in {"found_number", "PhoneNumber_Status"}]
+        base_cols_for_augmented = [c for c in base_cols if c not in {"found_number", "PhoneNumber_Status"}]
+    else:
+        base_cols_for_augmented = base_cols
     augmented_header: List[str] = []
     seen2 = set()
-    for col in list(base_cols) + list(augmented_extra_cols):
+    for col in list(base_cols_for_augmented) + list(augmented_extra_cols):
         if col in seen2:
             continue
         seen2.add(col)
@@ -471,6 +517,8 @@ def run_parallel_full_pipeline(
     final_aug_jsonl = os.path.join(run_output_dir, f"input_augmented_{run_id}.jsonl")
     try:
         df_live = pd.read_csv(live_csv_path, dtype=str, keep_default_na=False, na_filter=False)
+        # Drop internal meta columns from final outputs (keep them only in live files).
+        df_live = df_live[[c for c in df_live.columns if not str(c).startswith("__meta_")]]
         df_live.to_csv(final_csv, index=False, encoding="utf-8-sig")
         df_live.to_excel(final_xlsx, index=False)
         logger.info(f"Wrote final combined report: {final_csv} and {final_xlsx}")
@@ -479,25 +527,64 @@ def run_parallel_full_pipeline(
 
     # Final JSONL copies (end-to-end rows)
     try:
-        import shutil
         if os.path.exists(live_jsonl_path):
-            shutil.copyfile(live_jsonl_path, final_jsonl)
+            with open(live_jsonl_path, "r", encoding="utf-8") as fin, open(final_jsonl, "w", encoding="utf-8") as fout:
+                for line in fin:
+                    s = (line or "").strip()
+                    if not s:
+                        continue
+                    try:
+                        obj = json.loads(s)
+                        if isinstance(obj, dict):
+                            obj = {k: v for k, v in obj.items() if not str(k).startswith("__meta_")}
+                        fout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                    except Exception:
+                        # best-effort: keep raw line if it doesn't parse
+                        fout.write(s + "\n")
             logger.info(f"Wrote final JSONL report: {final_jsonl}")
     except Exception as e:
         logger.error(f"Failed to write final JSONL report: {e}", exc_info=True)
 
     try:
         df_aug = pd.read_csv(augmented_csv_path, dtype=str, keep_default_na=False, na_filter=False)
+        df_aug = df_aug[[c for c in df_aug.columns if not str(c).startswith("__meta_")]]
         df_aug.to_csv(final_aug_csv, index=False, encoding="utf-8-sig")
         logger.info(f"Wrote final augmented input: {final_aug_csv}")
     except Exception as e:
         logger.error(f"Failed to write final augmented input: {e}", exc_info=True)
 
     try:
-        import shutil
         if os.path.exists(augmented_jsonl_path):
-            shutil.copyfile(augmented_jsonl_path, final_aug_jsonl)
+            with open(augmented_jsonl_path, "r", encoding="utf-8") as fin, open(final_aug_jsonl, "w", encoding="utf-8") as fout:
+                for line in fin:
+                    s = (line or "").strip()
+                    if not s:
+                        continue
+                    try:
+                        obj = json.loads(s)
+                        if isinstance(obj, dict):
+                            obj = {k: v for k, v in obj.items() if not str(k).startswith("__meta_")}
+                        fout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                    except Exception:
+                        fout.write(s + "\n")
             logger.info(f"Wrote final augmented JSONL: {final_aug_jsonl}")
     except Exception as e:
         logger.error(f"Failed to write final augmented JSONL: {e}", exc_info=True)
 
+    # Safe cleanup of live files (only after confirming final outputs exist and are non-empty).
+    try:
+        def _nonempty(path: str) -> bool:
+            try:
+                return bool(path) and os.path.exists(path) and os.path.getsize(path) > 0
+            except Exception:
+                return False
+
+        if _nonempty(final_csv) and _nonempty(final_aug_csv):
+            for p in [live_csv_path, live_jsonl_path, status_path, augmented_csv_path, augmented_jsonl_path]:
+                try:
+                    if p and os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+    except Exception:
+        pass

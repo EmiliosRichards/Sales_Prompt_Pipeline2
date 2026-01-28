@@ -45,6 +45,64 @@ except ImportError:
     )
 
 
+def _coalesce_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure df has unique column names.
+
+    Some workflows intentionally feed "already augmented" CSVs back into the pipeline.
+    When an input profile maps (e.g.) "Website" -> "GivenURL" but the input already
+    contains a "GivenURL" column, pandas ends up with duplicate column names.
+
+    Duplicate column names are dangerous because row.get("GivenURL") can return a
+    pandas Series (multiple values), which then breaks downstream truthiness checks.
+
+    Strategy:
+    - For each duplicated column name, coalesce row-wise by taking the first non-empty value
+      across the duplicate columns.
+    - Drop all duplicates and re-insert a single coalesced column at the position of the
+      first occurrence (to preserve roughly stable column ordering).
+    """
+    try:
+        cols = list(df.columns)
+        dup_names = [c for c in cols if cols.count(c) > 1]
+        if not dup_names:
+            return df
+        seen = set()
+        for name in dup_names:
+            if name in seen:
+                continue
+            seen.add(name)
+            # Capture the first occurrence index before we drop anything
+            try:
+                first_idx = cols.index(name)
+            except ValueError:
+                first_idx = len(df.columns)
+            sub = df.loc[:, df.columns == name]
+            if sub.shape[1] <= 1:
+                continue
+            # Treat empty/whitespace-only strings as missing for coalescing
+            try:
+                sub_clean = sub.replace(r"^\s*$", pd.NA, regex=True)
+            except Exception:
+                sub_clean = sub
+            coalesced = sub_clean.bfill(axis=1).iloc[:, 0]
+            # Keep a stable empty-string for missing values (we run with keep_default_na=False)
+            try:
+                coalesced = coalesced.fillna("")
+            except Exception:
+                pass
+            # Drop all columns with this label and re-insert one coalesced column
+            df = df.drop(columns=[name])
+            # Bound insertion index to current width
+            insert_at = min(first_idx, len(df.columns))
+            df.insert(insert_at, name, coalesced)
+            cols = list(df.columns)
+        return df
+    except Exception:
+        # Best-effort only; never fail the loader due to dedupe logic
+        return df
+
+
 def _is_row_empty(row_values: Iterable[Any]) -> bool:
     """
     Checks if all values in a given row are effectively empty.
@@ -336,6 +394,9 @@ def load_and_preprocess_data(
 
         if actual_rename_map:
              df.rename(columns=actual_rename_map, inplace=True)
+        # If the input already contains canonical columns, profile renaming can create duplicates.
+        # Coalesce duplicates now so downstream row access always yields scalars, not Series.
+        df = _coalesce_duplicate_columns(df)
         logger.info(f"DataFrame columns after renaming (using profile: '{active_profile_name}'): {df.columns.tolist()}")
 
         # Drop accidental header rows in data (common in scraped/merged lists)

@@ -356,6 +356,35 @@ def main(args) -> None:
                 run_command=run_command
             )
 
+            # Safe cleanup of live output files (mirrors phone_extract behavior).
+            # Only delete after confirming stable final outputs exist and are non-empty.
+            try:
+                def _nonempty(path: str) -> bool:
+                    try:
+                        return bool(path) and os.path.exists(path) and os.path.getsize(path) > 0
+                    except Exception:
+                        return False
+
+                final_sales_csv = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}.csv")
+                final_aug_csv = os.path.join(run_output_dir, f"input_augmented_{run_id}.csv")
+                # We consider the run "safe to cleanup" once we have both stable outputs.
+                if _nonempty(final_sales_csv) and _nonempty(final_aug_csv):
+                    live_paths = [
+                        os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.csv"),
+                        os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.jsonl"),
+                        os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live_status.json"),
+                        os.path.join(run_output_dir, f"input_augmented_{run_id}_live.csv"),
+                        os.path.join(run_output_dir, f"input_augmented_{run_id}_live.jsonl"),
+                    ]
+                    for p in live_paths:
+                        try:
+                            if p and os.path.exists(p):
+                                os.remove(p)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
     except Exception as pipeline_exec_error:
         logger.error(f"An unhandled error occurred during pipeline execution or reporting: {pipeline_exec_error}", exc_info=True)
         run_metrics["errors_encountered"].append(f"Pipeline execution/reporting error: {str(pipeline_exec_error)}")

@@ -97,3 +97,4 @@ The repair helper can rebuild a complete final output set by:
 - overlaying one or more retry runs (missing row ranges)
 
 It writes standard final artifacts into the base run folder and records what happened in `REPAIR_SUMMARY.md`.
+

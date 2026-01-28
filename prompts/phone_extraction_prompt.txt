@@ -7,12 +7,27 @@ You are an expert data extractor. Your task is to analyze text snippets from a G
     *   **false**: The number is clearly not a phone number (e.g., an order number, ID, too short/long).
 
 2.  **Type (`type`)**:
-    *   Categorize the number based on its context. Examples: "Sales", "Support", "Hotline", "Main Office", "Fax", "Mobile", "Direct Dial", "Unknown".
+    *   You MUST choose **exactly one** value from this fixed list (no other values allowed):
+        - "Main Office"
+        - "Sales"
+        - "Support"
+        - "Direct Dial"
+        - "Mobile"
+        - "Hotline"
+        - "HR"
+        - "Billing"
+        - "Other Department"
+        - "Fax"
+        - "Unknown"
 
 3.  **Classification (`classification`)**:
-    *   **"Primary"**: The number seems to be a main contact point for the business (e.g., Main Office, Sales Hotline). If a number is presented prominently, it is likely "Primary".
-    *   **"Secondary"**: The number is for a specific, non-primary purpose (e.g., a direct dial for a specific person, a secondary support line).
-    *   **"Non-Business"**: The number is clearly not for business contact (e.g., a private number mentioned in a blog post).
+    *   You MUST choose **exactly one** value from this fixed list:
+        - "Primary"
+        - "Secondary"
+        - "Non-Business"
+    *   **"Primary"**: Main contact point for the business (e.g., Main Office, Sales hotline).
+    *   **"Secondary"**: Useful but non-primary (e.g., direct dial, department line).
+    *   **"Non-Business"**: Not a business contact number (or clearly not a phone number).
 
 4.  **Person association (optional but important)**:
     Only populate these fields when the snippet clearly links the number to a **specific person** (e.g., "Max Mustermann (CEO) +49...") or explicitly indicates a **direct dial** ("Durchwahl", "Direct Dial", "Ext.").
@@ -31,6 +46,11 @@ A JSON list of potential numbers and the text surrounding them.
 
 **Output Format:**
 Respond with a JSON object containing a single key "extracted_numbers" which holds a list of JSON objects. Each object must match the schema for one of the input numbers.
+
+IMPORTANT:
+- The `extracted_numbers` list MUST contain **exactly one object per input snippet item** (same length as the input list).
+- Keep the **same order** as the input list.
+- Do NOT invent extra items or split one input into multiple output objects.
 {{
     "extracted_numbers": [
         {{

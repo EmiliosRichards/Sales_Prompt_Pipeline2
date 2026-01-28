@@ -183,10 +183,8 @@ def initialize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
         'RegexCandidateSnippets': lambda: [[] for _ in range(df_length)],
         'BestMatchedPhoneNumbers': lambda: [[] for _ in range(df_length)], 
         'OtherRelevantNumbers': lambda: [[] for _ in range(df_length)],
-        'ConfidenceScore': None, 
         'LLMExtractedNumbers': lambda: [[] for _ in range(df_length)], 
         'LLMContextPath': '', 
-        'Notes': '',
         # Legacy + compatibility fields (some downstream outputs expect these names).
         'Primary_Number_1': None, 'Primary_Type_1': None, 'Primary_SourceURL_1': None,
         'Secondary_Number_1': None, 'Secondary_Type_1': None, 'Secondary_SourceURL_1': None,
@@ -200,6 +198,12 @@ def initialize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
         'Top_Number_1': None, 'Top_Type_1': None, 'Top_SourceURL_1': None,
         'Top_Number_2': None, 'Top_Type_2': None, 'Top_SourceURL_2': None,
         'Top_Number_3': None, 'Top_Type_3': None, 'Top_SourceURL_3': None,
+        # Main office / switchboard backup (never "lost" even if a direct dial outranks it)
+        'MainOffice_Number': None, 'MainOffice_Type': None, 'MainOffice_SourceURL': None,
+        # Second-stage ranking trace (optional; JSON in CSV, native in JSONL)
+        'LLMPhoneRanking': lambda: [None for _ in range(df_length)],
+        # Second-stage ranking error trace (string; populated when reranker fails/parsing fails)
+        'LLMPhoneRankingError': None,
         'Final_Row_Outcome_Reason': pd.Series([None] * df_length, dtype=object),
         'Determined_Fault_Category': pd.Series([None] * df_length, dtype=object)
     }

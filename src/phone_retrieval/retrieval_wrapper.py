@@ -116,9 +116,16 @@ def retrieve_phone_numbers_for_url(
                     "Secondary_Number_1", "Secondary_Type_1", "Secondary_SourceURL_1",
                     "Secondary_Number_2", "Secondary_Type_2", "Secondary_SourceURL_2",
                     "RegexCandidateSnippets", "BestMatchedPhoneNumbers", "OtherRelevantNumbers",
-                    "ConfidenceScore", "LLMExtractedNumbers", "LLMContextPath",
+                    "LLMExtractedNumbers", "LLMContextPath",
                     "Final_Row_Outcome_Reason", "Determined_Fault_Category",
                     "ScrapingStatus",
+                    # Person-associated contact fields (optional)
+                    "BestPersonContactName", "BestPersonContactRole", "BestPersonContactDepartment", "BestPersonContactNumber",
+                    "PersonContacts",
+                    # Main office / switchboard backup + ranking trace
+                    "MainOffice_Number", "MainOffice_Type", "MainOffice_SourceURL",
+                    "LLMPhoneRanking",
+                    "LLMPhoneRankingError",
                 ]
                 meta = {k: row0.get(k) for k in keep if k in row0}
         except Exception:

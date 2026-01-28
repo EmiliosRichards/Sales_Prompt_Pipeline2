@@ -1,5 +1,6 @@
 import logging
 import json
+from collections import defaultdict
 from typing import List, Dict, Any, Tuple, Optional
 
 import google.generativeai.types as genai_types # Standardized to google.generativeai
@@ -111,6 +112,7 @@ class LLMChunkProcessor:
         current_chunk_candidate_items: List[Dict[str, str]],
         final_processed_outputs_for_chunk: List[Optional[PhoneNumberLLMOutput]],
         items_needing_retry_for_chunk: List[Tuple[int, Dict[str, Any]]],
+        extra_processed_outputs_for_chunk: List[PhoneNumberLLMOutput],
         chunk_file_identifier_prefix: str,
         triggering_input_row_id: Any,
         triggering_company_name: str
@@ -154,14 +156,108 @@ class LLMChunkProcessor:
             validated_numbers_chunk = llm_result_chunk.extracted_numbers
 
             if len(validated_numbers_chunk) != len(current_chunk_candidate_items):
-                logger.error(f"[{chunk_file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] LLM chunk call: Mismatch in item count. Input: {len(current_chunk_candidate_items)}, Output: {len(validated_numbers_chunk)}. Marking all in chunk as error or for retry.")
-                # Decide if all become errors or add all to retry
-                for k_err, item_detail_chunk_err in enumerate(current_chunk_candidate_items):
-                    if final_processed_outputs_for_chunk[k_err] is None:
-                         # Add to retry, or mark as error if retries exhausted / not applicable
-                        items_needing_retry_for_chunk.append((k_err, item_detail_chunk_err))
-                        # As a fallback if retry doesn't resolve:
-                        # final_processed_outputs_for_chunk[k_err] = create_error_llm_item(item_detail_chunk_err, "Error_LLMItemCountMismatch", ...)
+                # Best-effort salvage: models sometimes emit multiple objects per input snippet
+                # (e.g., same number + source_url but multiple associated people).
+                # We align by (number, source_url) and keep one "best" item per input; extras are preserved.
+                logger.error(
+                    f"[{chunk_file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] "
+                    f"LLM chunk call: Mismatch in item count. Input: {len(current_chunk_candidate_items)}, Output: {len(validated_numbers_chunk)}. "
+                    f"Attempting best-effort alignment by (number, source_url)."
+                )
+
+                def _score_out(o: PhoneNumberLLMOutput) -> int:
+                    # Higher is better.
+                    score = 0
+                    try:
+                        if bool(getattr(o, "is_valid", False)):
+                            score += 100
+                    except Exception:
+                        pass
+                    cls = (getattr(o, "classification", None) or "").strip()
+                    if cls == "Primary":
+                        score += 30
+                    elif cls == "Secondary":
+                        score += 10
+                    elif cls == "Non-Business":
+                        score -= 50
+                    t = (getattr(o, "type", None) or "").strip()
+                    type_bonus = {
+                        "Direct Dial": 25,
+                        "Sales": 20,
+                        "Main Office": 15,
+                        "Support": 10,
+                        "Mobile": 5,
+                        "Hotline": 3,
+                        "HR": -5,
+                        "Billing": -5,
+                        "Other Department": 0,
+                        "Fax": -100,
+                        "Unknown": -10,
+                    }
+                    score += type_bonus.get(t, 0)
+                    # Prefer outputs that actually captured a person association when present
+                    if (getattr(o, "associated_person_name", None) or "").strip():
+                        score += 5
+                    if (getattr(o, "associated_person_role", None) or "").strip():
+                        score += 3
+                    return score
+
+                key_to_input_indices: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+                num_to_input_indices: Dict[str, List[int]] = defaultdict(list)
+                for idx, inp in enumerate(current_chunk_candidate_items):
+                    in_num = str(inp.get("candidate_number") or inp.get("number") or "").strip()
+                    in_url = str(inp.get("source_url") or "").strip().lower()
+                    key_to_input_indices[(in_num, in_url)].append(idx)
+                    if in_num:
+                        num_to_input_indices[in_num].append(idx)
+
+                idx_to_outputs: Dict[int, List[PhoneNumberLLMOutput]] = defaultdict(list)
+                for out in validated_numbers_chunk:
+                    out_num = str(getattr(out, "number", "") or "").strip()
+                    out_url = str(getattr(out, "source_url", "") or "").strip().lower()
+                    match_indices = key_to_input_indices.get((out_num, out_url))
+                    if not match_indices:
+                        # Fallback: match on number only (less safe)
+                        match_indices = num_to_input_indices.get(out_num)
+                    if not match_indices:
+                        continue
+                    idx_to_outputs[match_indices[0]].append(out)
+
+                for k, input_item_detail_chunk in enumerate(current_chunk_candidate_items):
+                    if final_processed_outputs_for_chunk[k] is not None:
+                        continue
+                    outs = idx_to_outputs.get(k, [])
+                    if not outs:
+                        items_needing_retry_for_chunk.append((k, input_item_detail_chunk))
+                        continue
+                    best = max(outs, key=_score_out)
+                    try:
+                        final_processed_outputs_for_chunk[k] = process_successful_llm_item(
+                            best,
+                            input_item_detail_chunk,
+                            self.config.target_country_codes,
+                            self.config.default_region_code,
+                        )
+                    except Exception:
+                        items_needing_retry_for_chunk.append((k, input_item_detail_chunk))
+                        continue
+
+                    # Preserve additional outputs that map to this same input item.
+                    for extra in outs:
+                        if extra is best:
+                            continue
+                        try:
+                            extra_processed_outputs_for_chunk.append(
+                                process_successful_llm_item(
+                                    extra,
+                                    input_item_detail_chunk,
+                                    self.config.target_country_codes,
+                                    self.config.default_region_code,
+                                )
+                            )
+                        except Exception:
+                            continue
+
             else:
                 for k, input_item_detail_chunk in enumerate(current_chunk_candidate_items):
                     if final_processed_outputs_for_chunk[k] is not None: # Already processed (e.g. by a successful retry pass)
@@ -251,6 +347,9 @@ class LLMChunkProcessor:
             logger.info(f"[{chunk_log_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] Processing chunk {chunks_processed_count} with {len(current_chunk_candidate_items)} items.")
 
             final_processed_outputs_for_chunk: List[Optional[PhoneNumberLLMOutput]] = [None] * len(current_chunk_candidate_items)
+            # Some models may emit more output objects than inputs (e.g., multiple people for one snippet).
+            # We preserve these as additional processed outputs instead of failing the whole chunk.
+            extra_outputs_for_chunk: List[PhoneNumberLLMOutput] = []
             
             # Initial LLM call for the chunk
             items_needing_retry_this_pass: List[Tuple[int, Dict[str, Any]]] = []
@@ -321,6 +420,7 @@ class LLMChunkProcessor:
                         current_chunk_candidate_items,
                         final_processed_outputs_for_chunk,
                         items_needing_retry_this_pass, # Populated by _process_llm_response_for_chunk
+                        extra_outputs_for_chunk,
                         chunk_log_prefix,
                         triggering_input_row_id,
                         triggering_company_name
@@ -393,12 +493,14 @@ class LLMChunkProcessor:
                         # Create temporary output list for this retry pass
                         temp_processed_outputs_for_retry_pass: List[Optional[PhoneNumberLLMOutput]] = [None] * len(inputs_for_this_retry_pass_details)
                         temp_items_needing_further_retry: List[Tuple[int, Dict[str, Any]]] = [] # Indices here are relative to inputs_for_this_retry_pass_details
+                        temp_extra_outputs_for_retry_pass: List[PhoneNumberLLMOutput] = []
 
                         self._process_llm_response_for_chunk(
                             raw_llm_response_text_retry_chunk,
                             inputs_for_this_retry_pass_details, # Current items being retried
                             temp_processed_outputs_for_retry_pass, # Temp list for this pass's results
                             temp_items_needing_further_retry,    # Items that *still* mismatch after this retry
+                            temp_extra_outputs_for_retry_pass,
                             retry_log_prefix,
                             triggering_input_row_id,
                             triggering_company_name
@@ -412,6 +514,9 @@ class LLMChunkProcessor:
                             original_chunk_index = original_indices_for_this_retry_pass[j_retry]
                             if processed_item_from_retry is not None: # If successfully processed or became an error
                                 final_processed_outputs_for_chunk[original_chunk_index] = processed_item_from_retry
+                        # Carry over any extra outputs produced during alignment in this retry pass.
+                        if temp_extra_outputs_for_retry_pass:
+                            extra_outputs_for_chunk.extend(temp_extra_outputs_for_retry_pass)
                         
                         # Map items from temp_items_needing_further_retry back to original chunk indices
                         for k_further_retry, (idx_in_retry_pass, item_detail) in enumerate(temp_items_needing_further_retry):
@@ -458,6 +563,8 @@ class LLMChunkProcessor:
                     )
             
             overall_processed_outputs.extend([item for item in final_processed_outputs_for_chunk if item is not None])
+            if extra_outputs_for_chunk:
+                overall_processed_outputs.extend(extra_outputs_for_chunk)
         # End of chunk loop
 
         final_combined_raw_response_str = "\n\n---CHUNK_SEPARATOR---\n\n".join(overall_raw_responses_list) if overall_raw_responses_list else None

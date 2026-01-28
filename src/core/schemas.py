@@ -10,6 +10,11 @@ from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field
 
 
+class GermanShortSummaryOutput(BaseModel):
+    """Short German summary/translation used in pitch-from-description mode."""
+    german_summary: str = Field(description="German summary text (max 100 words).")
+
+
 class AdditionalInformation(BaseModel):
     """
     Represents a piece of additional information, potentially tied to a phone number,
@@ -83,6 +88,33 @@ class MinimalExtractionOutput(BaseModel):
     This is a simple wrapper around a list of PhoneNumberLLMOutput objects.
     """
     extracted_numbers: List[PhoneNumberLLMOutput] = Field(description="A list of phone number objects extracted and classified by the LLM.")
+
+
+class PhoneRankingItem(BaseModel):
+    """One ranked phone number result for outbound calling."""
+    number: str = Field(description="Phone number in E.164 where possible.")
+    type: str = Field(description="One of the allowed phone types (e.g., 'Sales', 'Main Office', 'Direct Dial').")
+    priority_label: str = Field(description="One of: Decision Maker | Commercial Contact | Gatekeeper/Main Line | Support/Service | Low Value | Unknown")
+    associated_person_name: Optional[str] = Field(default=None, description="Optional person name if ranking is based on an individual.")
+    associated_person_role: Optional[str] = Field(default=None, description="Optional person role/title if ranking is based on an individual.")
+    associated_person_department: Optional[str] = Field(default=None, description="Optional department/team if present.")
+    reason: Optional[str] = Field(default=None, description="Short reason for this ranking position.")
+
+
+class PhoneRankingOutput(BaseModel):
+    """Output of the second-stage phone ranking call."""
+    ranked_numbers: List[PhoneRankingItem] = Field(description="Up to 3 ranked callable business numbers.")
+    deprioritized_numbers: List[PhoneRankingItem] = Field(
+        default_factory=list,
+        description="Callable numbers that appear to belong to the target organization but are low value (try last).",
+    )
+    suspected_other_org_numbers: List[PhoneRankingItem] = Field(
+        default_factory=list,
+        description="Numbers that appear to belong to another organization/entity (do not call).",
+    )
+    main_office_backup_number: Optional[str] = Field(default=None, description="A main office / switchboard backup number if present.")
+    main_office_backup_type: Optional[str] = Field(default=None, description="Type label for the main office backup (should be 'Main Office' when used).")
+    reasoning_summary: Optional[str] = Field(default=None, description="Short overall reasoning summary.")
 
 class CompanyContactDetails(BaseModel):
     """

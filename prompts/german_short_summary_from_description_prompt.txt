@@ -1,0 +1,19 @@
+Erst intern Schritt für Schritt denken und den Text verstehen. Dann gib NUR das finale JSON aus.
+
+Deine Aufgabe: Du erhältst einen Beschreibungstext (oft Englisch, ggf. mit Keywords/Reasoning). Erstelle daraus eine **kurze Zusammenfassung auf Deutsch** (Übersetzung + Verdichtung), die für Menschen schnell lesbar ist.
+
+WICHTIG:
+- Antworte ausschließlich mit **einem** validen JSON-Objekt (keine Erklärungen, kein Markdown).
+- Gib **maximal 100 Wörter** in `german_summary` aus.
+- Nutze klare, sachliche Sprache. Keine Marketing-Floskeln.
+- Wenn der Text zu wenig hergibt: gib eine sehr kurze, vorsichtige Zusammenfassung (keine Erfindungen).
+
+JSON Output Structure:
+{
+  "german_summary": "…"
+}
+
+--------INPUT DESCRIPTION TEXT------------
+{{INPUT_DESCRIPTION_PLACEHOLDER}}
+-----------END OF TEXT-------------------
+

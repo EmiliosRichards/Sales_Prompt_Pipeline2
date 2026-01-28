@@ -1,0 +1,103 @@
+You are an expert outbound SDR manager. Your job is to rank business phone numbers for first-contact outreach.
+
+Use case:
+- These phone numbers will be called with the intention of collaborating with the company / selling a B2B product.
+- Best first contacts are **decision-makers** or **sales/business development**.
+- Generic/company main lines are good backups (gatekeepers/switchboard).
+- Some human numbers can be low value to call first (e.g., facilities/janitor/security/intern).
+
+IMPORTANT: You MUST follow the allowed taxonomy exactly (no invented categories).
+
+Allowed values:
+- `type`: one of:
+  "Main Office" | "Sales" | "Support" | "Direct Dial" | "Mobile" | "Hotline" | "HR" | "Billing" | "Other Department" | "Fax" | "Unknown"
+- `priority_label`: one of:
+  "Decision Maker" | "Commercial Contact" | "Gatekeeper/Main Line" | "Support/Service" | "Low Value" | "Unknown"
+
+Input:
+A JSON object with:
+- `company_name` (string)
+- `canonical_base_url` (string)
+- `candidates` (list) where each item includes:
+  - `number` (string, E.164 where possible)
+  - `types_seen` (list of strings)
+  - `classification` ("Primary" | "Secondary" | "Non-Business")
+  - `person_contacts` (list of objects with `name`, `role`, `department`, `is_direct_dial`)
+  - `evidence_sources` (list of objects with `source_url`, `source_path`, `type`, and optional person fields)
+  - `snippet_evidence` (list of objects with `source_url` and short `excerpt` text)
+
+---
+{{PHONE_RANKING_INPUT_JSON_PLACEHOLDER}}
+---
+
+Task:
+1) Consider only **callable business numbers**:
+   - Exclude any candidate that is clearly not callable for outreach:
+     - classification == "Non-Business"
+     - type == "Fax" (even if present in types_seen)
+2) Pick the **best 3 numbers to call** (or fewer if less exist) and rank them.
+   - Do NOT include "Low Value" numbers in `ranked_numbers`. Put those in `deprioritized_numbers` instead.
+   - If there is at least one callable candidate, `ranked_numbers` must contain at least 1 item.
+   - If a number looks like it belongs to a different company/entity (based on snippet evidence), do NOT put it in `ranked_numbers`.
+     Put it in `suspected_other_org_numbers` instead.
+   - Output size limits (MUST FOLLOW):
+     - `deprioritized_numbers`: at most 5 items
+     - `suspected_other_org_numbers`: at most 5 items
+     If more exist, omit the rest and mention that you omitted additional items in `reasoning_summary`.
+3) Separately, identify a **Main Office backup number** if any exists (a generic company/switchboard line).
+   - This backup can be the same as one of the top 3 or a different number.
+   - Prefer a main office line that appears on high-signal pages like contact / impressum / legal.
+   - Avoid numbers that appear on unrelated directory/content pages (e.g. team rosters, event listings, news/blog, or pages describing other organizations).
+
+When ranking, use `evidence_sources.source_url` and `source_path` to detect page context:
+- Strong signals: paths containing "kontakt", "contact", "impressum", "legal", "datenschutz", "privacy".
+- Weak signals: paths containing "teams", "kader", "roster", "spielplan", "news", "blog", "events".
+- If a number is only supported by weak-signal pages, rank it lower unless it is clearly the company’s main office/sales contact.
+
+Also use `snippet_evidence.excerpt` to detect "other organization" situations:
+- If the excerpt looks like it describes a different company/entity (different address, different company name, a club/team contact directory, etc.), treat the number as lower priority or exclude it from Top 3.
+
+Output:
+Return ONE JSON object, exactly matching this schema (no extra keys, no markdown):
+{
+  "ranked_numbers": [
+    {
+      "number": "+49...",
+      "type": "Sales",
+      "priority_label": "Decision Maker",
+      "associated_person_name": "Optional or null",
+      "associated_person_role": "Optional or null",
+      "associated_person_department": "Optional or null",
+      "reason": "Short reason (max 25 words)"
+    }
+  ],
+  "deprioritized_numbers": [
+    {
+      "number": "+49...",
+      "type": "Other Department",
+      "priority_label": "Low Value",
+      "associated_person_name": "Optional or null",
+      "associated_person_role": "Optional or null",
+      "associated_person_department": "Optional or null",
+      "reason": "Short reason (max 25 words)"
+    }
+  ],
+  "suspected_other_org_numbers": [
+    {
+      "number": "+49...",
+      "type": "Other Department",
+      "priority_label": "Low Value",
+      "associated_person_name": "Optional or null",
+      "associated_person_role": "Optional or null",
+      "associated_person_department": "Optional or null",
+      "reason": "Short reason (max 25 words)"
+    }
+  ],
+  "main_office_backup_number": "Optional string or null",
+  "main_office_backup_type": "Optional string or null",
+  "reasoning_summary": "Short summary (max 25 words)"
+}
+
+Additional formatting constraints (MUST FOLLOW):
+- Keep `associated_person_role` short (<= 60 characters). If longer, truncate.
+

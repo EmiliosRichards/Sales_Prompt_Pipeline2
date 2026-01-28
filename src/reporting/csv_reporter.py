@@ -8,6 +8,7 @@ consistent output for easier consumption and review.
 """
 import os
 import logging
+import json
 import re
 from typing import List, Dict, Any, Optional
 import pandas as pd
@@ -168,10 +169,31 @@ def write_sales_outreach_report(
             # Initialize a base row structure
             row = {
                 'Company Name': None, 'Original_Number': None, 'URL': original_url,
+                'CanonicalEntryURL': None,
+                'PhoneNumber_Status': None,
                 'is_b2b': None, 'is_b2b_reason': None,
                 'serves_1000': None, 'serves_1000_reason': None,
                 'found_number': None,
-                'sales_pitch': None, 'description': None, 'matched_golden_partner': None,
+                # Top callable numbers (LLM-ranked when phone retrieval ran; otherwise may be input-provided)
+                'Top_Number_1': None, 'Top_Type_1': None, 'Top_SourceURL_1': None,
+                'Top_Number_2': None, 'Top_Type_2': None, 'Top_SourceURL_2': None,
+                'Top_Number_3': None, 'Top_Type_3': None, 'Top_SourceURL_3': None,
+                # Person-associated contact fields (optional; populated by phone extraction when present)
+                'BestPersonContactName': None,
+                'BestPersonContactRole': None,
+                'BestPersonContactDepartment': None,
+                'BestPersonContactNumber': None,
+                'PersonContacts': None,
+                # Main office / switchboard backup + LLM ranking trace
+                'MainOffice_Number': None,
+                'MainOffice_Type': None,
+                'MainOffice_SourceURL': None,
+                'LLMPhoneRanking': None,
+                'LLMPhoneRankingError': None,
+                # Callable-but-deprioritized + suspected other-org buckets (second-stage phone reranker)
+                'DeprioritizedNumbers': None,
+                'SuspectedOtherOrgNumbers': None,
+                'sales_pitch': None, 'Short German Description': None, 'matched_golden_partner': None,
                 'match_reasoning': None,
                 'Industry': None,
                 'Matched Partner Description': '', 'Avg Leads Per Day': '',
@@ -190,13 +212,37 @@ def write_sales_outreach_report(
                 row.update({
                     'Company Name': original_row_data.get('CompanyName'),
                     'Original_Number': original_row_data.get('Original_Number') or original_row_data.get('PhoneNumber') or original_row_data.get('Number'),
-                    'description': original_row_data.get('Description'),
+                    'CanonicalEntryURL': original_row_data.get('CanonicalEntryURL'),
+                    'PhoneNumber_Status': original_row_data.get('PhoneNumber_Status'),
+                    # Prefer the pipeline-produced short German description if present; fall back to input Description.
+                    'Short German Description': original_row_data.get('Short German Description') or original_row_data.get('Description'),
                     'Industry': original_row_data.get('Industry'),
                     'is_b2b': original_row_data.get('is_b2b'),
                     'is_b2b_reason': original_row_data.get('is_b2b_reason'),
                     'serves_1000': original_row_data.get('serves_1000'),
                     'serves_1000_reason': original_row_data.get('serves_1000_reason'),
                     'found_number': original_row_data.get('found_number'),
+                    'Top_Number_1': original_row_data.get('Top_Number_1'),
+                    'Top_Type_1': original_row_data.get('Top_Type_1'),
+                    'Top_SourceURL_1': original_row_data.get('Top_SourceURL_1'),
+                    'Top_Number_2': original_row_data.get('Top_Number_2'),
+                    'Top_Type_2': original_row_data.get('Top_Type_2'),
+                    'Top_SourceURL_2': original_row_data.get('Top_SourceURL_2'),
+                    'Top_Number_3': original_row_data.get('Top_Number_3'),
+                    'Top_Type_3': original_row_data.get('Top_Type_3'),
+                    'Top_SourceURL_3': original_row_data.get('Top_SourceURL_3'),
+                    'BestPersonContactName': original_row_data.get('BestPersonContactName'),
+                    'BestPersonContactRole': original_row_data.get('BestPersonContactRole'),
+                    'BestPersonContactDepartment': original_row_data.get('BestPersonContactDepartment'),
+                    'BestPersonContactNumber': original_row_data.get('BestPersonContactNumber'),
+                    'PersonContacts': original_row_data.get('PersonContacts'),
+                    'MainOffice_Number': original_row_data.get('MainOffice_Number'),
+                    'MainOffice_Type': original_row_data.get('MainOffice_Type'),
+                    'MainOffice_SourceURL': original_row_data.get('MainOffice_SourceURL'),
+                    'LLMPhoneRanking': original_row_data.get('LLMPhoneRanking'),
+                    'LLMPhoneRankingError': original_row_data.get('LLMPhoneRankingError'),
+                    'DeprioritizedNumbers': original_row_data.get('DeprioritizedNumbers'),
+                    'SuspectedOtherOrgNumbers': original_row_data.get('SuspectedOtherOrgNumbers'),
                     'Original Row Number': original_row_data.get('original_row_number'),
                     'ScrapeStatus': original_row_data.get('ScrapingStatus'),
                 })
@@ -207,7 +253,7 @@ def write_sales_outreach_report(
 
             if item:
                 row.update({
-                    'description': item.summary or row.get('Description'),
+                    'Short German Description': item.summary or row.get('Short German Description'),
                     'sales_pitch': item.phone_sales_line.replace('{programmatic placeholder}', f"{item.avg_leads_per_day:.0f}") if item.phone_sales_line and item.avg_leads_per_day is not None else item.phone_sales_line,
                     'match_reasoning': "; ".join(item.match_rationale_features) if item.match_rationale_features else "",
                     'matched_golden_partner': item.matched_partner_name or '',
@@ -234,6 +280,21 @@ def write_sales_outreach_report(
             # Optionally attach Parsed_Contacts column when available
             if parsed_contacts_val:
                 row['Parsed_Contacts'] = parsed_contacts_val
+
+            # Ensure PersonContacts is serialized to a stable string for CSV/Excel friendliness.
+            # (JSONL outputs elsewhere preserve native objects.)
+            try:
+                if isinstance(row.get("PersonContacts"), (list, dict)):
+                    row["PersonContacts"] = json.dumps(row["PersonContacts"], ensure_ascii=False)
+            except Exception:
+                pass
+
+            # Same for second-stage ranking trace (if present)
+            try:
+                if isinstance(row.get("LLMPhoneRanking"), (list, dict)):
+                    row["LLMPhoneRanking"] = json.dumps(row["LLMPhoneRanking"], ensure_ascii=False)
+            except Exception:
+                pass
             report_data.append(row)
 
         if not report_data:

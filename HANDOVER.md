@@ -153,7 +153,7 @@ python main_pipeline.py -i data\final_80k.csv -r 1-200 -s batch1 --workers 20
 #### Useful flags
 - `--input-profile <name>`: override `INPUT_FILE_PROFILE_NAME` at runtime.
 - `--skip-prequalification`: bypass B2B/capacity filtering (runs the rest of the flow).
-- `--pitch-from-description`: skip scraping and build pitch from description fields only.
+- `--pitch-from-description`: skip scraping and build pitch from description fields only (still runs a small LLM call to create a German ≤100-word summary for the output `description` field).
 - `--force-phone-extraction`: always run phone retrieval even if an input phone exists.
 - `--workers <N>`: run the **full pipeline** in parallel (scrape + summarize + attributes + partner match + sales pitch + optional phone retrieval).
 - `-t/--test`: routes Slack notifications to the test channel (if configured).

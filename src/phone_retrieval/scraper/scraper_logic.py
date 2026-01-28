@@ -339,6 +339,24 @@ def find_internal_links(html_content: str, base_url: str, input_row_id: Any, com
     normalized_base_url_str = normalize_url(base_url)
     parsed_base_url = urlparse(normalized_base_url_str)
 
+    # Phone-extraction specific: always consider contact/imprint/legal pages in-scope,
+    # even if TARGET_LINK_KEYWORDS is tuned for "about/products/services" (full pipeline).
+    in_scope_keywords: Set[str] = set((config_instance.target_link_keywords or []))
+    try:
+        in_scope_keywords.update(getattr(config_instance, "page_type_keywords_contact", []) or [])
+        in_scope_keywords.update(getattr(config_instance, "page_type_keywords_imprint", []) or [])
+        in_scope_keywords.update(getattr(config_instance, "page_type_keywords_legal", []) or [])
+    except Exception:
+        pass
+
+    # Treat these as highest-priority paths for phone extraction (where phone numbers usually live).
+    phone_priority_segments: Set[str] = set()
+    try:
+        phone_priority_segments.update(getattr(config_instance, "page_type_keywords_contact", []) or [])
+        phone_priority_segments.update(getattr(config_instance, "page_type_keywords_imprint", []) or [])
+    except Exception:
+        pass
+
     for link_tag in soup.find_all('a', href=True):
         if not isinstance(link_tag, Tag): continue
         href_attr = link_tag.get('href')
@@ -357,9 +375,8 @@ def find_internal_links(html_content: str, base_url: str, input_row_id: Any, com
         link_text = link_tag.get_text().lower().strip()
         link_href_lower = normalized_link_url.lower()
         initial_keyword_match = False
-        if config_instance.target_link_keywords:
-            if any(kw in link_text for kw in config_instance.target_link_keywords) or \
-               any(kw in link_href_lower for kw in config_instance.target_link_keywords):
+        if in_scope_keywords:
+            if any(kw in link_text for kw in in_scope_keywords) or any(kw in link_href_lower for kw in in_scope_keywords):
                 initial_keyword_match = True
         if not initial_keyword_match: continue
 
@@ -372,6 +389,10 @@ def find_internal_links(html_content: str, base_url: str, input_row_id: Any, com
         score = 0
         path_segments = [seg for seg in parsed_normalized_link.path.lower().strip('/').split('/') if seg]
         num_segments = len(path_segments)
+
+        # Force-boost likely phone-bearing pages (Kontakt/Impressum) so they are scraped early.
+        if phone_priority_segments and any(seg in phone_priority_segments for seg in path_segments):
+            score = max(score, 100)
 
         if config_instance.scraper_critical_priority_keywords:
             for crit_kw in config_instance.scraper_critical_priority_keywords:

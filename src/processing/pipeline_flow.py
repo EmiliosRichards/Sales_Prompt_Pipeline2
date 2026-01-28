@@ -36,6 +36,9 @@ from src.llm_clients.gemini_client import GeminiClient
 from src.scraper import scrape_website
 from src.scraper import scraper_logic as full_scraper_logic
 from src.extractors.llm_tasks.summarize_task import generate_website_summary
+from src.extractors.llm_tasks.german_short_summary_from_description_task import (
+    generate_german_short_summary_from_description,
+)
 from src.extractors.llm_tasks.extract_attributes_task import extract_detailed_attributes
 from src.extractors.llm_tasks.match_partner_task import match_partner
 from src.extractors.llm_tasks.generate_sales_pitch_task import generate_sales_pitch
@@ -78,6 +81,79 @@ def _pick_first_usable_phone(row: pd.Series, df: pd.DataFrame, col_names: List[s
         if s and not should_attempt_phone_retrieval(s):
             return s
     return ""
+
+
+def _is_fax_type_label(type_str: Any) -> bool:
+    """Return True if a type label indicates a fax line."""
+    s = ("" if type_str is None else str(type_str)).strip().lower()
+    return "fax" in s or "telefax" in s
+
+
+def _pick_best_callable_top_number(row: pd.Series) -> str:
+    """
+    Pick the best callable number from Top_Number_1..3 while skipping fax entries.
+    Returns "" if none found.
+    """
+    for i in (1, 2, 3):
+        num = _normalize_phone_str(row.get(f"Top_Number_{i}"))
+        typ = str(row.get(f"Top_Type_{i}", "") or "").strip()
+        if not num:
+            continue
+        if _is_fax_type_label(typ):
+            continue
+        return num
+    return ""
+
+
+def _configure_full_scraper_runtime(app_config: AppConfig) -> None:
+    """
+    The full-pipeline scraper modules use module-level `config_instance = AppConfig()`.
+    To ensure per-run flags (e.g., scraped-content reuse) are honored, rebind those globals.
+    """
+    try:
+        from src.scraper import scraper_logic as _sl
+        from src.scraper import scraper_utils as _su
+        from src.scraper import page_handler as _ph
+        _sl.config_instance = app_config
+        _su.config_instance = app_config
+        _ph.config_instance = app_config
+    except Exception:
+        # Best-effort only; scraper will fall back to its defaults/env.
+        pass
+
+
+def _build_input_context_blob(df: pd.DataFrame, index: Any) -> str:
+    """
+    Build a compact text blob from input-provided fields when we want to avoid scraping/summarization.
+    Common in Apollo-style inputs: Short Description + Keywords + reasoning.
+    """
+    def _get(col: str) -> str:
+        try:
+            if col in df.columns:
+                v = df.at[index, col]
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+                # Allow non-str but non-empty
+                if v is not None:
+                    s = str(v).strip()
+                    return s if s and s.lower() not in {"nan", "none", "null"} else ""
+        except Exception:
+            return ""
+        return ""
+
+    parts: List[str] = []
+    # Prefer short/structured inputs first
+    sd = _get("Short Description") or _get("Description") or _get("Combined_Description")
+    kw = _get("Keywords") or _get("keywords")
+    rs = _get("reasoning") or _get("Reasoning")
+
+    if sd:
+        parts.append(f"Short description:\n{sd}")
+    if kw:
+        parts.append(f"Keywords:\n{kw}")
+    if rs:
+        parts.append(f"Reasoning:\n{rs}")
+    return "\n\n".join([p for p in parts if p]).strip()
 
 
 def _format_avg_leads_per_day(val: Any) -> Optional[str]:
@@ -221,7 +297,7 @@ def execute_pipeline_flow(
         # SalesOutreach live outputs
         live_report_header = list(df.columns) + [
             'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status', 'is_b2b', 'serves_1000',
-            'is_b2b_reason', 'serves_1000_reason', 'description', 'Industry',
+            'is_b2b_reason', 'serves_1000_reason', 'Short German Description', 'Industry',
             'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
             'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
             'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
@@ -233,10 +309,16 @@ def execute_pipeline_flow(
         sales_jsonl_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.jsonl")
         sales_jsonl_reporter = LiveJsonlReporter(filepath=sales_jsonl_path)
 
-        # Augmented-input live outputs (original columns + enrichment columns).
-        augmented_header = list(df.columns) + [
-            'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status',
-            'description', 'Industry',
+        # Augmented-input live outputs (input columns + appended sales columns).
+        augmented_base_cols = list(df.columns)
+        # If phone retrieval is skipped, don't introduce the full pipeline's own phone summary columns
+        # into the augmented output (keep phone_extract outputs "as-is").
+        if not bool(getattr(app_config, "enable_phone_retrieval_in_full_pipeline", True)) and not bool(getattr(app_config, "force_phone_extraction", False)):
+            augmented_base_cols = [c for c in augmented_base_cols if c not in {"found_number", "PhoneNumber_Status"}]
+
+        augmented_header = augmented_base_cols + [
+            'CanonicalEntryURL',
+            'Short German Description', 'Industry',
             'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
             'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
             'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
@@ -281,6 +363,7 @@ def execute_pipeline_flow(
             phone_col_key,               # canonical phone for full pipeline
             "GivenPhoneNumber",          # common canonical for phone-only outputs
             "PhoneNumber_Found",         # common augmented column from phone_extract
+            "Top_Number_1",              # preferred if a prior phone_extract already selected a best call number
         ]
         if original_phone_column_name and original_phone_column_name not in candidate_phone_cols:
             candidate_phone_cols.append(original_phone_column_name)
@@ -304,6 +387,8 @@ def execute_pipeline_flow(
         detailed_attributes_obj: Optional[DetailedCompanyAttributes] = None
         final_match_output: Optional[GoldenPartnerMatchOutput] = None
         b2b_analysis_obj: Optional[B2BAnalysisOutput] = None
+        german_short_summary: Optional[str] = None
+        german_short_summary_error: Optional[str] = None
 
         # --- 1. URL Processing ---
         processed_url, url_status = process_input_url(
@@ -339,24 +424,22 @@ def execute_pipeline_flow(
             scraped_text_to_use = None
 
             if pitch_from_description:
-                # Use description text directly; skip scraping
-                # Try Description-like columns
-                candidate_desc_cols = ['Combined_Description', 'Description']
-                # Use the already-resolved active_profile to infer mapped Description
-                if active_profile:
-                    for original_name, mapped_name in active_profile.items():
-                        if not original_name.startswith('_') and mapped_name == 'Description':
-                            candidate_desc_cols.append('Description')
-                            break
-                for col in candidate_desc_cols:
-                    if col in df.columns:
-                        try:
-                            val = df.at[index, col]
-                            if isinstance(val, str) and val.strip():
-                                scraped_text_to_use = val
-                                break
-                        except Exception:
-                            continue
+                # Use input-provided text directly; skip scraping.
+                # Prefer the structured Apollo-like columns (Short Description + reasoning + Keywords)
+                # and fall back to Description/Combined_Description when needed.
+                scraped_text_to_use = _build_input_context_blob(df, index)
+                if not scraped_text_to_use:
+                    # Fallback to existing behavior
+                    candidate_desc_cols = ['Combined_Description', 'Description', 'Short Description']
+                    for col in candidate_desc_cols:
+                        if col in df.columns:
+                            try:
+                                val = df.at[index, col]
+                                if isinstance(val, str) and val.strip():
+                                    scraped_text_to_use = val.strip()
+                                    break
+                            except Exception:
+                                continue
                 df.at[index, 'ScrapingStatus'] = 'Used_Description_Only'
                 current_row_scraper_status = 'Used_Description_Only'
                 true_base_domain_for_row = get_canonical_base_url(processed_url)
@@ -367,12 +450,9 @@ def execute_pipeline_flow(
 
                 # --- 2. Scrape Website ---
                 logger.info(f"{log_identifier} Starting website scraping for: {processed_url}")
-                # Ensure the scraper module uses this run's AppConfig (it has a module-level config_instance).
-                # This also enables per-run options like reuse_scraped_content_if_available / cache dirs.
-                try:
-                    full_scraper_logic.config_instance = app_config
-                except Exception:
-                    pass
+                # Ensure the scraper modules use this run's AppConfig (they have module-level config_instance).
+                # This enables per-run options like scraped-content reuse/caches/keywords.
+                _configure_full_scraper_runtime(app_config)
                 _, scraper_status, final_canonical_entry_url, collected_summary_text = asyncio.run(
                     scrape_website(processed_url, run_output_dir, company_name_str, globally_processed_urls, index, run_id)
                 )
@@ -523,14 +603,75 @@ def execute_pipeline_flow(
             
             logger.info(f"{log_identifier} Collected {len(scraped_text_to_use)} characters for LLM processing.")
 
-            # Ensure variables exist regardless of optional branches (skip-prequalification / skip-pitch)
-            b2b_analysis_obj = None
-            final_match_output = None
-
-            # --- 3a. Pre-qualification (optional) ---
+            # Prefix for all LLM artifacts for this row (shared across tasks).
             llm_file_prefix_row = sanitize_filename_component(
                 f"Row{index}_{company_name_str[:20]}_{str(time.time())[-5:]}", max_len=50
             )
+
+            # Ensure variables exist regardless of optional branches (skip-prequalification / skip-pitch)
+            b2b_analysis_obj = None
+            final_match_output = None
+            german_short_summary = None
+            german_short_summary_error = None
+
+            # When using input descriptions (skip scraping), we still generate a short German summary
+            # (human-readable, <=100 words) for outputs. This does NOT replace the full context used
+            # for attribute extraction; it only feeds the final output "Short German Description" column / output summary.
+            if pitch_from_description:
+                try:
+                    gs_tuple = generate_german_short_summary_from_description(
+                        gemini_client=gemini_client,
+                        config=app_config,
+                        description_text=str(scraped_text_to_use or ""),
+                        llm_context_dir=llm_context_dir,
+                        llm_requests_dir=llm_requests_dir,
+                        file_identifier_prefix=llm_file_prefix_row,
+                        triggering_input_row_id=index,
+                        triggering_company_name=company_name_str,
+                    )
+                    german_short_summary = gs_tuple[0]
+                    german_short_summary_error = None if german_short_summary else (gs_tuple[1] or "Unknown error")
+                    if gs_tuple[2]:
+                        run_metrics["llm_processing_stats"]["total_llm_prompt_tokens"] += gs_tuple[2].get("prompt_tokens", 0)
+                        run_metrics["llm_processing_stats"]["total_llm_completion_tokens"] += gs_tuple[2].get("completion_tokens", 0)
+                        run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += gs_tuple[2].get("total_tokens", 0)
+                        run_metrics["llm_processing_stats"]["llm_calls_german_short_summary_from_description"] = (
+                            run_metrics["llm_processing_stats"].get("llm_calls_german_short_summary_from_description", 0) + 1
+                        )
+                    if german_short_summary_error:
+                        # Non-fatal: keep going, but log for auditability.
+                        log_row_failure(
+                            failure_writer,
+                            index,
+                            company_name_str,
+                            given_url_original_str,
+                            "LLM_GermanShortSummary_Failed",
+                            "Failed to generate German short summary from description (non-fatal).",
+                            datetime.now().isoformat(),
+                            json.dumps({"raw_error": german_short_summary_error}),
+                            associated_pathful_canonical_url=final_canonical_entry_url,
+                        )
+                        row_level_failure_counts["LLM_GermanShortSummary_Failed"] += 1
+                except Exception as e_gs:
+                    german_short_summary = None
+                    german_short_summary_error = str(e_gs)
+                    try:
+                        log_row_failure(
+                            failure_writer,
+                            index,
+                            company_name_str,
+                            given_url_original_str,
+                            "LLM_GermanShortSummary_Failed",
+                            "Unhandled error generating German short summary from description (non-fatal).",
+                            datetime.now().isoformat(),
+                            json.dumps({"exception": german_short_summary_error}),
+                            associated_pathful_canonical_url=final_canonical_entry_url,
+                        )
+                        row_level_failure_counts["LLM_GermanShortSummary_Failed"] += 1
+                    except Exception:
+                        pass
+
+            # --- 3a. Pre-qualification (optional) ---
             if not skip_prequalification:
                 b2b_capacity_tuple = check_b2b_and_capacity(
                     gemini_client=gemini_client,
@@ -598,50 +739,61 @@ def execute_pipeline_flow(
                 df.at[index, 'serves_1000_reason'] = None
 
             # --- 3. LLM Call 1: Generate Website Summary ---
-            summary_obj_tuple = generate_website_summary(
-                gemini_client=gemini_client,
-                config=app_config,
-                original_url=given_url_original_str,
-                scraped_text=scraped_text_to_use,
-                llm_context_dir=llm_context_dir,
-                llm_requests_dir=llm_requests_dir,
-                file_identifier_prefix=llm_file_prefix_row,
-                triggering_input_row_id=index,
-                triggering_company_name=company_name_str
-            )
-            website_summary_obj = summary_obj_tuple[0]
-            if summary_obj_tuple[2]:  # token_stats
-                run_metrics["llm_processing_stats"]["total_llm_prompt_tokens"] += \
-                    summary_obj_tuple[2].get("prompt_tokens", 0)
-                run_metrics["llm_processing_stats"]["total_llm_completion_tokens"] += \
-                    summary_obj_tuple[2].get("completion_tokens", 0)
-                run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += \
-                    summary_obj_tuple[2].get("total_tokens", 0)
-                run_metrics["llm_processing_stats"]["llm_calls_summary_generation"] = \
-                    run_metrics["llm_processing_stats"].get("llm_calls_summary_generation", 0) + 1
+            # If we're running in "pitch from description" mode, we can skip summarization entirely
+            # and treat the input-provided context as the "summary" for attribute extraction.
+            if pitch_from_description:
+                website_summary_obj = WebsiteTextSummary(
+                    original_url=given_url_original_str,
+                    summary=str(scraped_text_to_use or "").strip(),
+                    extracted_company_name_from_summary=company_name_str if company_name_str else None,
+                    key_topics_mentioned=[],
+                )
+                logger.info(f"{log_identifier} Using input-provided description context as summary (skipping LLM summarization).")
+            else:
+                summary_obj_tuple = generate_website_summary(
+                    gemini_client=gemini_client,
+                    config=app_config,
+                    original_url=given_url_original_str,
+                    scraped_text=scraped_text_to_use,
+                    llm_context_dir=llm_context_dir,
+                    llm_requests_dir=llm_requests_dir,
+                    file_identifier_prefix=llm_file_prefix_row,
+                    triggering_input_row_id=index,
+                    triggering_company_name=company_name_str
+                )
+                website_summary_obj = summary_obj_tuple[0]
+                if summary_obj_tuple[2]:  # token_stats
+                    run_metrics["llm_processing_stats"]["total_llm_prompt_tokens"] += \
+                        summary_obj_tuple[2].get("prompt_tokens", 0)
+                    run_metrics["llm_processing_stats"]["total_llm_completion_tokens"] += \
+                        summary_obj_tuple[2].get("completion_tokens", 0)
+                    run_metrics["llm_processing_stats"]["total_llm_tokens_overall"] += \
+                        summary_obj_tuple[2].get("total_tokens", 0)
+                    run_metrics["llm_processing_stats"]["llm_calls_summary_generation"] = \
+                        run_metrics["llm_processing_stats"].get("llm_calls_summary_generation", 0) + 1
 
-            if not website_summary_obj or not website_summary_obj.summary:
-                logger.warning(f"{log_identifier} LLM Call 1 (Summarization) failed. Raw: {summary_obj_tuple[1]}")
-                log_row_failure(
-                    failure_writer, index, company_name_str, given_url_original_str,
-                    "LLM_Summarization_Failed", "Failed to generate website summary.",
-                    datetime.now().isoformat(),
-                    json.dumps({"raw_response": summary_obj_tuple[1] or "N/A"})
-                )
-                row_level_failure_counts["LLM_Summarization_Failed"] += 1
-                rows_failed_count += 1
-                all_golden_partner_match_outputs.append(
-                    GoldenPartnerMatchOutput(
-                        analyzed_company_url=given_url_original_str,
-                        analyzed_company_attributes=DetailedCompanyAttributes(
-                            input_summary_url=given_url_original_str
-                        ),
-                        match_rationale_features=["LLM Summarization Failed"],
-                        scrape_status=current_row_scraper_status
+                if not website_summary_obj or not website_summary_obj.summary:
+                    logger.warning(f"{log_identifier} LLM Call 1 (Summarization) failed. Raw: {summary_obj_tuple[1]}")
+                    log_row_failure(
+                        failure_writer, index, company_name_str, given_url_original_str,
+                        "LLM_Summarization_Failed", "Failed to generate website summary.",
+                        datetime.now().isoformat(),
+                        json.dumps({"raw_response": summary_obj_tuple[1] or "N/A"})
                     )
-                )
-                continue
-            logger.info(f"{log_identifier} LLM Call 1 (Summarization) successful.")
+                    row_level_failure_counts["LLM_Summarization_Failed"] += 1
+                    rows_failed_count += 1
+                    all_golden_partner_match_outputs.append(
+                        GoldenPartnerMatchOutput(
+                            analyzed_company_url=given_url_original_str,
+                            analyzed_company_attributes=DetailedCompanyAttributes(
+                                input_summary_url=given_url_original_str
+                            ),
+                            match_rationale_features=["LLM Summarization Failed"],
+                            scrape_status=current_row_scraper_status
+                        )
+                    )
+                    continue
+                logger.info(f"{log_identifier} LLM Call 1 (Summarization) successful.")
 
             # --- 4. LLM Call 2: Extract Detailed Attributes ---
             attributes_obj_tuple = extract_detailed_attributes(
@@ -702,13 +854,20 @@ def execute_pipeline_flow(
                             num = num[1:].strip()
                         if num:
                             df.at[index, 'found_number'] = num
-                            # Populate Top_/Primary_ compatibility fields from provided input.
-                            df.at[index, "Top_Number_1"] = num
-                            df.at[index, "Top_Type_1"] = "Provided_In_Input"
-                            df.at[index, "Top_SourceURL_1"] = ""
-                            df.at[index, "Primary_Number_1"] = num
-                            df.at[index, "Primary_Type_1"] = "Provided_In_Input"
-                            df.at[index, "Primary_SourceURL_1"] = ""
+                            # Populate Top_/Primary_ compatibility fields from provided input,
+                            # but do NOT overwrite values that may already exist (e.g., from phone_extract resume).
+                            if _is_blank_cell(df.at[index, "Top_Number_1"]):
+                                df.at[index, "Top_Number_1"] = num
+                            if _is_blank_cell(df.at[index, "Top_Type_1"]):
+                                df.at[index, "Top_Type_1"] = "Provided_In_Input"
+                            if _is_blank_cell(df.at[index, "Top_SourceURL_1"]):
+                                df.at[index, "Top_SourceURL_1"] = ""
+                            if _is_blank_cell(df.at[index, "Primary_Number_1"]):
+                                df.at[index, "Primary_Number_1"] = num
+                            if _is_blank_cell(df.at[index, "Primary_Type_1"]):
+                                df.at[index, "Primary_Type_1"] = "Provided_In_Input"
+                            if _is_blank_cell(df.at[index, "Primary_SourceURL_1"]):
+                                df.at[index, "Primary_SourceURL_1"] = ""
                     else:
                         phone_status = "Skipped_Phone_Retrieval"
                         logger.info(f"{log_identifier} Phone retrieval skipped (ENABLE_PHONE_RETRIEVAL_IN_FULL_PIPELINE=False).")
@@ -745,7 +904,14 @@ def execute_pipeline_flow(
                             phone_status = "No_Main_Line_Found"
                         
                         if best_number:
-                            df.at[index, 'found_number'] = best_number
+                            # Never treat fax lines as callable outreach numbers.
+                            # Prefer Top_Number_* if the wrapper provided them; otherwise fall back to best_number.
+                            best_callable = ""
+                            try:
+                                best_callable = _pick_best_callable_top_number(df.loc[index])
+                            except Exception:
+                                best_callable = ""
+                            df.at[index, 'found_number'] = best_callable or best_number
                             # If the wrapper returned detailed fields, prefer those; otherwise fill minimal compatibility.
                             if _is_blank_cell(df.at[index, "Top_Number_1"]):
                                 df.at[index, "Top_Number_1"] = best_number
@@ -779,13 +945,20 @@ def execute_pipeline_flow(
                             num = num[1:].strip()
                         if num:
                             df.at[index, 'found_number'] = num
-                            # Populate Top_/Primary_ compatibility fields from provided input.
-                            df.at[index, "Top_Number_1"] = num
-                            df.at[index, "Top_Type_1"] = "Provided_In_Input"
-                            df.at[index, "Top_SourceURL_1"] = ""
-                            df.at[index, "Primary_Number_1"] = num
-                            df.at[index, "Primary_Type_1"] = "Provided_In_Input"
-                            df.at[index, "Primary_SourceURL_1"] = ""
+                            # Populate Top_/Primary_ compatibility fields from provided input,
+                            # but do NOT overwrite values that may already exist (e.g., from phone_extract resume).
+                            if _is_blank_cell(df.at[index, "Top_Number_1"]):
+                                df.at[index, "Top_Number_1"] = num
+                            if _is_blank_cell(df.at[index, "Top_Type_1"]):
+                                df.at[index, "Top_Type_1"] = "Provided_In_Input"
+                            if _is_blank_cell(df.at[index, "Top_SourceURL_1"]):
+                                df.at[index, "Top_SourceURL_1"] = ""
+                            if _is_blank_cell(df.at[index, "Primary_Number_1"]):
+                                df.at[index, "Primary_Number_1"] = num
+                            if _is_blank_cell(df.at[index, "Primary_Type_1"]):
+                                df.at[index, "Primary_Type_1"] = "Provided_In_Input"
+                            if _is_blank_cell(df.at[index, "Primary_SourceURL_1"]):
+                                df.at[index, "Primary_SourceURL_1"] = ""
             df.at[index, 'PhoneNumber_Status'] = phone_status
 
             # Decide whether we have a usable phone number for outreach (found or usable input fallback).
@@ -799,6 +972,13 @@ def execute_pipeline_flow(
                     found_number_val = ""
                 if found_number_val.startswith("'") and len(found_number_val) > 1:
                     found_number_val = found_number_val[1:].strip()
+                # Final safety: never allow fax to gate sales pitch generation.
+                try:
+                    if _is_fax_type_label(df.at[index, "Top_Type_1"]) and found_number_val == _normalize_phone_str(df.at[index, "Top_Number_1"]):
+                        found_number_val = ""
+                        df.at[index, "found_number"] = ""
+                except Exception:
+                    pass
 
             input_number_val = _normalize_phone_str(phone_number_original)
 
@@ -812,12 +992,18 @@ def execute_pipeline_flow(
                     df.at[index, 'PhoneNumber_Status'] = "Provided_In_Input_CompanyPhone"
                 found_number_val = input_number_val
                 # Populate Top_/Primary_ compatibility fields from fallback input phone.
-                df.at[index, "Top_Number_1"] = input_number_val
-                df.at[index, "Top_Type_1"] = "Provided_In_Input"
-                df.at[index, "Top_SourceURL_1"] = ""
-                df.at[index, "Primary_Number_1"] = input_number_val
-                df.at[index, "Primary_Type_1"] = "Provided_In_Input"
-                df.at[index, "Primary_SourceURL_1"] = ""
+                if _is_blank_cell(df.at[index, "Top_Number_1"]):
+                    df.at[index, "Top_Number_1"] = input_number_val
+                if _is_blank_cell(df.at[index, "Top_Type_1"]):
+                    df.at[index, "Top_Type_1"] = "Provided_In_Input"
+                if _is_blank_cell(df.at[index, "Top_SourceURL_1"]):
+                    df.at[index, "Top_SourceURL_1"] = ""
+                if _is_blank_cell(df.at[index, "Primary_Number_1"]):
+                    df.at[index, "Primary_Number_1"] = input_number_val
+                if _is_blank_cell(df.at[index, "Primary_Type_1"]):
+                    df.at[index, "Primary_Type_1"] = "Provided_In_Input"
+                if _is_blank_cell(df.at[index, "Primary_SourceURL_1"]):
+                    df.at[index, "Primary_SourceURL_1"] = ""
 
             # NOTE: We always create a GoldenPartnerMatchOutput for the row (even when skipping),
             # so downstream outputs can show a reason rather than being blank.
@@ -828,7 +1014,7 @@ def execute_pipeline_flow(
                 final_match_output = GoldenPartnerMatchOutput(
                     analyzed_company_url=given_url_original_str,
                     analyzed_company_attributes=detailed_attributes_obj,
-                    summary=website_summary_obj.summary if website_summary_obj else None,
+                    summary=german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
                     match_rationale_features=["Skipped pitch generation: no usable phone number found"],
                     scrape_status=current_row_scraper_status,
                 )
@@ -872,7 +1058,7 @@ def execute_pipeline_flow(
                     final_match_output = GoldenPartnerMatchOutput(
                         analyzed_company_url=detailed_attributes_obj.input_summary_url,
                         analyzed_company_attributes=detailed_attributes_obj,
-                        summary=website_summary_obj.summary if website_summary_obj else None,
+                        summary=german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
                         match_rationale_features=["LLM Partner Matching Failed or No Match Found"],
                         scrape_status=current_row_scraper_status,
                     )
@@ -896,7 +1082,7 @@ def execute_pipeline_flow(
                         final_match_output = GoldenPartnerMatchOutput(
                             analyzed_company_url=detailed_attributes_obj.input_summary_url,
                             analyzed_company_attributes=detailed_attributes_obj,
-                            summary=website_summary_obj.summary if website_summary_obj else None,
+                            summary=german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
                             match_rationale_features=["Matched partner data missing; pitch not generated"],
                             scrape_status=current_row_scraper_status,
                         )
@@ -937,7 +1123,7 @@ def execute_pipeline_flow(
                             final_match_output = GoldenPartnerMatchOutput(
                                 analyzed_company_url=detailed_attributes_obj.input_summary_url,
                                 analyzed_company_attributes=detailed_attributes_obj,
-                                summary=website_summary_obj.summary if website_summary_obj else None,
+                                summary=german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
                                 match_rationale_features=["LLM Sales Pitch Generation Failed"],
                                 scrape_status=current_row_scraper_status,
                             )
@@ -955,7 +1141,7 @@ def execute_pipeline_flow(
                                 pass
                             final_match_output.scrape_status = current_row_scraper_status
                             final_match_output.analyzed_company_attributes = detailed_attributes_obj
-                            final_match_output.summary = website_summary_obj.summary if website_summary_obj else None
+                            final_match_output.summary = german_short_summary or (website_summary_obj.summary if website_summary_obj else None)
                             all_golden_partner_match_outputs.append(final_match_output)
 
             input_to_canonical_map[given_url_original_str] = true_base_domain_for_row
@@ -1006,7 +1192,7 @@ def execute_pipeline_flow(
                 'serves_1000': df.at[index, 'serves_1000'] if 'serves_1000' in df.columns else None,
                 'is_b2b_reason': df.at[index, 'is_b2b_reason'] if 'is_b2b_reason' in df.columns else None,
                 'serves_1000_reason': df.at[index, 'serves_1000_reason'] if 'serves_1000_reason' in df.columns else None,
-                'description': website_summary_obj.summary if website_summary_obj else None,
+                'Short German Description': german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
                 'Industry': detailed_attributes_obj.industry if detailed_attributes_obj else None,
                 'Products/Services Offered': "; ".join(detailed_attributes_obj.products_services_offered) if detailed_attributes_obj and detailed_attributes_obj.products_services_offered else None,
                 'USP/Key Selling Points': "; ".join(detailed_attributes_obj.usp_key_selling_points) if detailed_attributes_obj and detailed_attributes_obj.usp_key_selling_points else None,

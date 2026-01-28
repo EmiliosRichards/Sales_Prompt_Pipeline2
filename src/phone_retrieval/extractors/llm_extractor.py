@@ -10,7 +10,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 # Project-specific imports
 from src.core.config import AppConfig
-from src.core.schemas import PhoneNumberLLMOutput, HomepageContextOutput
+from src.core.schemas import PhoneNumberLLMOutput, HomepageContextOutput, PhoneRankingOutput
 from src.phone_retrieval.utils.helpers import sanitize_filename_component
 from src.phone_retrieval.llm_clients.gemini_client import GeminiClient
 from src.phone_retrieval.extractors.llm_chunk_processor import LLMChunkProcessor
@@ -46,6 +46,10 @@ class GeminiLLMExtractor:
         self.phone_extraction_prompt_path = "prompts/phone_extraction_prompt.txt"
         logger.info(f"Using phone extraction prompt: {self.phone_extraction_prompt_path}")
 
+        # Second-stage phone ranking prompt (LLM ranks callable business numbers for outreach)
+        self.phone_ranking_prompt_path = "prompts/phone_ranking_prompt.txt"
+        logger.info(f"Using phone ranking prompt: {self.phone_ranking_prompt_path}")
+
 
         self.chunk_processor = LLMChunkProcessor(
             config=self.config,
@@ -53,6 +57,122 @@ class GeminiLLMExtractor:
             prompt_template_path=self.phone_extraction_prompt_path # Corrected parameter name
         )
         logger.info(f"GeminiLLMExtractor initialized, using GeminiClient and LLMChunkProcessor for phone extraction.")
+
+    def rank_phone_numbers_for_outreach(
+        self,
+        *,
+        company_name: str,
+        canonical_base_url: str,
+        candidates: List[Dict[str, Any]],
+        llm_context_dir: str,
+        file_identifier_prefix: str,
+        triggering_input_row_id: Any,
+    ) -> Tuple[Optional[PhoneRankingOutput], Optional[str], Optional[str]]:
+        """
+        Second-stage LLM call: rank callable business numbers for outreach (top 3)
+        and optionally identify a main-office backup number.
+
+        Returns:
+            (parsed_output, raw_text, error_message)
+        """
+        log_prefix = f"[{file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {company_name}, Type: PhoneRanking]"
+        try:
+            if not candidates:
+                return None, None, None
+
+            prompt_template = load_prompt_template(self.phone_ranking_prompt_path)
+            payload = {
+                "company_name": company_name,
+                "canonical_base_url": canonical_base_url,
+                "candidates": candidates,
+            }
+            prompt = prompt_template.replace(
+                "{{PHONE_RANKING_INPUT_JSON_PLACEHOLDER}}",
+                json.dumps(payload, ensure_ascii=False),
+            )
+
+            # NOTE: The legacy `google.generativeai` SDK rejects JSON schemas containing `$defs`.
+            # To keep this robust, we rely on prompt-enforced JSON and parse manually (no response_schema).
+            gen_cfg = genai_types.GenerationConfig(
+                temperature=0.1,
+                # Some sites generate a lot of candidates; give the model enough room to finish valid JSON.
+                max_output_tokens=4096,
+                response_mime_type="application/json",
+            )
+            resp = self.gemini_client.generate_content_with_retry(
+                contents=prompt,
+                generation_config=gen_cfg,
+                file_identifier_prefix=file_identifier_prefix,
+                triggering_input_row_id=triggering_input_row_id,
+                triggering_company_name=company_name,
+            )
+            raw_text = getattr(resp, "text", None)
+
+            # Persist artifacts (best-effort)
+            try:
+                save_llm_artifact(
+                    content=prompt,
+                    directory=llm_context_dir,
+                    filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_prompt.txt",
+                    log_prefix=log_prefix,
+                )
+                if raw_text:
+                    save_llm_artifact(
+                        content=raw_text,
+                        directory=llm_context_dir,
+                        filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_raw_output.txt",
+                        log_prefix=log_prefix,
+                    )
+            except Exception:
+                pass
+
+            json_str = extract_json_from_text(raw_text) if raw_text else None
+            if not json_str:
+                err = "Could not extract JSON from phone ranking response."
+                logger.warning(f"{log_prefix} {err}")
+                # Persist error artifact (best-effort)
+                try:
+                    save_llm_artifact(
+                        content=err,
+                        directory=llm_context_dir,
+                        filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_error.txt",
+                        log_prefix=log_prefix,
+                    )
+                except Exception:
+                    pass
+                return None, raw_text, err
+            try:
+                obj = json.loads(json_str)
+                parsed = PhoneRankingOutput(**obj)
+                return parsed, raw_text, None
+            except Exception as e:
+                err = f"Failed to parse phone ranking JSON: {e}"
+                logger.warning(f"{log_prefix} {err}")
+                # Persist error artifact (best-effort)
+                try:
+                    save_llm_artifact(
+                        content=err,
+                        directory=llm_context_dir,
+                        filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_error.txt",
+                        log_prefix=log_prefix,
+                    )
+                except Exception:
+                    pass
+                return None, raw_text, err
+        except Exception as e:
+            err = f"Unexpected error during phone ranking: {e}"
+            logger.error(f"{log_prefix} {err}", exc_info=True)
+            # Persist error artifact (best-effort)
+            try:
+                save_llm_artifact(
+                    content=err,
+                    directory=llm_context_dir,
+                    filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_error.txt",
+                    log_prefix=log_prefix,
+                )
+            except Exception:
+                pass
+            return None, None, err
 
     # Redundant private methods (_load_prompt_template, _normalize_phone_number,
     # _extract_json_from_text, _generate_content_with_retry,

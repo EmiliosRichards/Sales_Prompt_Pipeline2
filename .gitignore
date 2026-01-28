@@ -36,3 +36,12 @@ output_data/
 data/Manuav Company DE 5-30 B2B.csv
 data/Manuav Company DE 5-30 B2B_comma.csv
 data/Apollo Shopware Partner Germany 1(Sheet1).csv
+data/manuav_009_500_spgpece_apolsc_formatted.csv
+data/results_stitched.csv
+data/results_stitched.jsonl
+data/source_rows_augmented_unique_3k_ce_b2_apol.csv
+data/5-30apollo-new-runs/input_augmented_5_30_STITCHED2_ops_suggested_WITH_SHORT_GERMAN_DESC_v2.csv
+data/5-30apollo-new-runs/input_augmented_5_30_STITCHED2_ops_suggested_WITH_SHORT_GERMAN_DESC.csv
+data/5-30apollo-new-runs/input_augmented_5_30_STITCHED2_ops_suggested_WITH_SHORT_GERMAN_DESC.csv.cache.jsonl
+data/5-30apollo-new-runs/input_augmented_5_30_STITCHED2_ops_suggested.csv
+data/5-30apollo-new-runs/source_rows_augmented4_unique_500_3k_apol.csv

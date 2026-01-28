@@ -135,10 +135,11 @@ def save_llm_artifact(content: str, directory: str, filename: str, log_prefix: s
     """
     try:
         os.makedirs(directory, exist_ok=True)
-        # Assuming a max_len for the filename component if desired, otherwise sanitize_filename_component default.
-        # For consistency with llm_extractor, let's use a placeholder for max_len or remove if not strictly needed here.
-        # For now, let's assume sanitize_filename_component handles it well without max_len or use a sensible default.
-        sanitized_filename = sanitize_filename_component(filename) 
+        # Preserve file extensions and avoid truncating the whole filename (which can drop ".json"/".txt").
+        base, ext = os.path.splitext(filename)
+        safe_base = sanitize_filename_component(base, max_len=160)
+        safe_ext = ext if ext else ""
+        sanitized_filename = f"{safe_base}{safe_ext}"
         filepath = os.path.join(directory, sanitized_filename)
         
         with open(filepath, 'w', encoding='utf-8') as f:
@@ -213,6 +214,22 @@ def process_successful_llm_item(
     source_url_val = input_item_details.get('source_url')
     llm_output.source_url = str(source_url_val) if source_url_val is not None else "Unknown Source"
     llm_output.original_input_company_name = input_item_details.get('original_input_company_name')
+
+    # Enforce a fixed taxonomy for type/classification so downstream logic never sees unmapped categories.
+    allowed_types = {
+        "Main Office", "Sales", "Support", "Direct Dial", "Mobile", "Hotline", "HR", "Billing", "Other Department", "Fax", "Unknown"
+    }
+    allowed_classifications = {"Primary", "Secondary", "Non-Business"}
+    try:
+        t = (llm_output.type or "").strip()
+        if t not in allowed_types:
+            llm_output.type = "Unknown"
+        c = (llm_output.classification or "").strip()
+        if c not in allowed_classifications:
+            llm_output.classification = "Non-Business"
+    except Exception:
+        # Best-effort only; keep original values if something unexpected happens.
+        pass
 
     if llm_output.number:
         normalized_num = normalize_phone_number(

@@ -1,0 +1,12 @@
+{
+  "base_augmented_rows": 572,
+  "sales_reports": [
+    "output_data\\20260126_093300_apol4_sales_desc_on_phone_v2\\SalesOutreachReport_20260126_093300_apol4_sales_desc_on_phone_v2.csv"
+  ],
+  "combined_sales_rows": 541,
+  "combined_sales_rows_only_inputs": 541,
+  "base_rows_without_sales_match": 31,
+  "sales_rows_without_base_match": 0,
+  "sales_orphan_rows_no_url": 0
+}
+

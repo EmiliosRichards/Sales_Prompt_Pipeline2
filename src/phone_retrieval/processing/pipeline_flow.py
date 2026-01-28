@@ -18,12 +18,13 @@ from src.core.schemas import (
     ConsolidatedPhoneNumberSource,
     HomepageContextOutput,
     DomainExtractionBundle,
+    PhoneRankingOutput,
 )
 from src.phone_retrieval.data_handling.consolidator import get_canonical_base_url, process_and_consolidate_contact_data
 from src.phone_retrieval.extractors.llm_extractor import GeminiLLMExtractor
 from src.phone_retrieval.extractors.regex_extractor import extract_numbers_with_snippets_from_text
 from src.phone_retrieval.scraper import scrape_website
-from src.phone_retrieval.utils.helpers import log_row_failure
+from src.phone_retrieval.utils.helpers import log_row_failure, sanitize_filename_component
 from src.phone_retrieval.processing.url_processor import process_input_url
 from src.phone_retrieval.processing.outcome_analyzer import determine_final_row_outcome_and_fault, determine_final_domain_outcome_and_fault
 
@@ -38,6 +39,21 @@ def _safe_str_list(val: Any) -> List[str]:
     return [s] if s else []
 
 
+def _safe_str(val: Any) -> str:
+    """Best-effort normalize a pandas cell value to a usable string (or '')."""
+    try:
+        if val is None:
+            return ""
+        s = str(val).strip()
+        if not s or s.lower() in {"nan", "none", "null"}:
+            return ""
+        if s.startswith("'") and len(s) > 1:
+            s = s[1:].strip()
+        return s
+    except Exception:
+        return ""
+
+
 def _summarize_sources_for_number(n: ConsolidatedPhoneNumber) -> tuple[str, str]:
     """Return (types_csv, source_urls_csv) for a ConsolidatedPhoneNumber."""
     types = sorted({(s.type or "").strip() for s in (n.sources or []) if (s.type or "").strip()})
@@ -45,14 +61,41 @@ def _summarize_sources_for_number(n: ConsolidatedPhoneNumber) -> tuple[str, str]
     return ", ".join(types), ", ".join(urls)
 
 
+def _candidate_types_seen_for_number(n: ConsolidatedPhoneNumber) -> List[str]:
+    """Return a de-duplicated list of type labels seen for this number across sources."""
+    out: List[str] = []
+    seen = set()
+    for s in (n.sources or []):
+        t = (getattr(s, "type", None) or "").strip()
+        if not t:
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 def _role_score(role: str) -> int:
     r = (role or "").strip().lower()
     if not r:
         return 0
+    # Explicit low-value / non-decision-maker roles (avoid over-prioritizing random staff over main line).
+    low = [
+        "janitor", "caretaker", "facility", "facilities", "hausmeister", "hauswart",
+        "security", "wach", "pförtner", "porter",
+        "cleaner", "reinigung", "cleaning",
+        "driver", "fahrer", "chauffeur",
+        "intern", "praktikant", "trainee", "azubi",
+    ]
     high = ["ceo", "geschäftsführer", "geschaeftsfuehrer", "founder", "inhaber", "owner", "vorstand", "managing director"]
     sales = ["vertrieb", "sales", "business development", "account", "kundenberater", "key account"]
     tech = ["cto", "it", "technik", "engineering", "product", "produkt"]
     hr = ["hr", "personal", "recruiting"]
+    ops = ["office", "sekretariat", "assist", "assistant", "rezeption", "reception", "front desk"]
+    if any(k in r for k in low):
+        return -50
     if any(k in r for k in high):
         return 100
     if any(k in r for k in sales):
@@ -61,6 +104,9 @@ def _role_score(role: str) -> int:
         return 50
     if any(k in r for k in hr):
         return 30
+    if any(k in r for k in ops):
+        # Helpful, but typically not better than main office / sales.
+        return 20
     return 10
 
 
@@ -68,11 +114,18 @@ def _extract_person_contacts(numbers: List[ConsolidatedPhoneNumber]) -> List[Dic
     """Flatten person-associated sources into a list of contacts."""
     out: List[Dict[str, Any]] = []
     for n in numbers or []:
+        # Don't treat Non-Business numbers as person contacts.
+        if (n.classification or "").strip().lower() == "non-business":
+            continue
         for s in (n.sources or []):
             name = (getattr(s, "associated_person_name", None) or "").strip()
             role = (getattr(s, "associated_person_role", None) or "").strip()
             dept = (getattr(s, "associated_person_department", None) or "").strip()
             is_dd = getattr(s, "is_direct_dial", None)
+            t = (getattr(s, "type", None) or "")
+            if "fax" in str(t).lower() or "telefax" in str(t).lower():
+                # Never treat fax as a callable person contact.
+                continue
             # Only treat as a "person contact" if we have an explicit person name OR an explicit direct-dial signal.
             # This avoids incorrectly treating generic department labels as person-associated.
             if not (name or is_dd is True):
@@ -116,11 +169,16 @@ def _pick_best_person_contact(contacts: List[Dict[str, Any]]) -> Optional[Dict[s
             s += 10
         return s
 
-    return sorted(contacts, key=score, reverse=True)[0]
+    best = sorted(contacts, key=score, reverse=True)[0]
+    # Only treat as "best person contact" if it clears a minimum quality bar.
+    # This prevents low-value roles (e.g., janitor/facilities) from outranking the main office line.
+    if score(best) < 90:
+        return None
+    return best
 
 
-def _rank_consolidated_numbers_for_outreach(numbers: List[ConsolidatedPhoneNumber]) -> List[ConsolidatedPhoneNumber]:
-    """Rank consolidated numbers for operational calling (Top_Number_1..3)."""
+def _rank_consolidated_numbers_for_diagnostics(numbers: List[ConsolidatedPhoneNumber]) -> List[ConsolidatedPhoneNumber]:
+    """Rank consolidated numbers for display/debug (fax allowed, but penalized)."""
     if not numbers:
         return []
 
@@ -152,10 +210,9 @@ def _rank_consolidated_numbers_for_outreach(numbers: List[ConsolidatedPhoneNumbe
             role = getattr(s, "associated_person_role", None) or ""
             name = getattr(s, "associated_person_name", None) or ""
             is_dd = getattr(s, "is_direct_dial", None)
-            # Only boost when we have an explicit person name or explicit direct-dial.
             if not (name.strip() or is_dd is True):
                 continue
-            base = 20  # explicit person/direct-dial is already valuable
+            base = 20
             bonus = max(bonus, base + _role_score(role) + (40 if is_dd is True else 0))
         return bonus
 
@@ -168,17 +225,176 @@ def _rank_consolidated_numbers_for_outreach(numbers: List[ConsolidatedPhoneNumbe
     return [n for _s, n in scored]
 
 
-def _confidence_for_best(best: Optional[ConsolidatedPhoneNumber]) -> Optional[float]:
-    if not best:
-        return None
-    cls = (best.classification or "").strip().lower()
-    if cls == "primary":
-        return 0.9
-    if cls == "secondary":
-        return 0.75
-    if cls:
-        return 0.6
-    return None
+def _rank_consolidated_numbers_for_outreach(numbers: List[ConsolidatedPhoneNumber]) -> List[ConsolidatedPhoneNumber]:
+    """LEGACY (deprecated): rank consolidated numbers for operational calling.
+
+    Callable list rules:
+    - Exclude fax lines
+    - Exclude Non-Business numbers
+    """
+    if not numbers:
+        return []
+
+    def is_fax_number(n: ConsolidatedPhoneNumber) -> bool:
+        types_csv, _ = _summarize_sources_for_number(n)
+        return "fax" in (types_csv or "").lower()
+
+    def is_non_business(n: ConsolidatedPhoneNumber) -> bool:
+        return (n.classification or "").strip().lower() == "non-business"
+
+    callable_numbers = [n for n in numbers if (not is_fax_number(n)) and (not is_non_business(n))]
+    if not callable_numbers:
+        return []
+    return _rank_consolidated_numbers_for_diagnostics(callable_numbers)
+
+
+def _select_top_numbers_for_outreach(numbers: List[ConsolidatedPhoneNumber]) -> List[ConsolidatedPhoneNumber]:
+    """
+    LEGACY (deprecated): deterministic heuristic Top-number selection.
+
+    The pipeline no longer uses this for `Top_Number_1..3` (LLM reranker only).
+
+    Select up to 3 high-value callable numbers in a deliberate order:
+    1) Best person-associated direct dial (by role score), when present
+    2) Best Sales/Vertrieb line
+    3) Best Main Office / Zentrale line
+    4) Fill remaining slots with next-best ranked callable numbers
+
+    Fax and Non-Business numbers are excluded (callable list).
+    """
+    ranked = _rank_consolidated_numbers_for_outreach(numbers)
+    if not ranked:
+        return []
+
+    by_num = {n.number: n for n in ranked if n and n.number}
+    chosen: List[ConsolidatedPhoneNumber] = []
+
+    def types_csv(n: ConsolidatedPhoneNumber) -> str:
+        t, _ = _summarize_sources_for_number(n)
+        return (t or "").lower()
+
+    def is_sales(n: ConsolidatedPhoneNumber) -> bool:
+        t = types_csv(n)
+        return ("sales" in t) or ("vertrieb" in t)
+
+    def is_main(n: ConsolidatedPhoneNumber) -> bool:
+        t = types_csv(n)
+        return ("main" in t) or ("zentrale" in t) or ("headquarter" in t) or ("head office" in t)
+
+    # 1) Best person-associated contact (prefer direct dial + high-role).
+    contacts = _extract_person_contacts(ranked)
+    best_contact = _pick_best_person_contact(contacts)
+    if best_contact:
+        num = (best_contact.get("number") or "").strip()
+        if num and num in by_num:
+            chosen.append(by_num[num])
+
+    # 2) Best sales line (if not already chosen)
+    for n in ranked:
+        if n.number in {c.number for c in chosen}:
+            continue
+        if is_sales(n):
+            chosen.append(n)
+            break
+
+    # 3) Best main line (if not already chosen)
+    for n in ranked:
+        if n.number in {c.number for c in chosen}:
+            continue
+        if is_main(n):
+            chosen.append(n)
+            break
+
+    # 4) Fill remaining slots with best-ranked callable numbers
+    for n in ranked:
+        if len(chosen) >= 3:
+            break
+        if n.number in {c.number for c in chosen}:
+            continue
+        chosen.append(n)
+
+    return chosen[:3]
+
+
+def _build_phone_rerank_candidates(
+    numbers: List[ConsolidatedPhoneNumber],
+    app_config: AppConfig,
+    snippet_evidence_map: Optional[Dict[str, List[Dict[str, str]]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Build a compact candidate list to send to the second-stage phone ranking LLM.
+    This does NOT attempt to decide "best" locally; it just packages evidence.
+    """
+    max_items = int(getattr(app_config, "phone_llm_rerank_max_candidates", 25) or 25)
+    out: List[Dict[str, Any]] = []
+    for n in numbers or []:
+        evidence = []
+        for s in (n.sources or [])[:6]:
+            evidence.append(
+                {
+                    "source_url": getattr(s, "original_full_url", None),
+                    "source_path": getattr(s, "source_path", None),
+                    "type": getattr(s, "type", None),
+                    "associated_person_name": getattr(s, "associated_person_name", None),
+                    "associated_person_role": getattr(s, "associated_person_role", None),
+                    "associated_person_department": getattr(s, "associated_person_department", None),
+                    "is_direct_dial": getattr(s, "is_direct_dial", None),
+                }
+            )
+        out.append(
+            {
+                "number": n.number,
+                "types_seen": _candidate_types_seen_for_number(n),
+                "classification": (n.classification or "").strip(),
+                "person_contacts": _extract_person_contacts([n]),
+                "evidence_sources": evidence,
+                "snippet_evidence": (snippet_evidence_map or {}).get(n.number, []) if n.number else [],
+            }
+        )
+    if max_items > 0 and len(out) > max_items:
+        out = out[:max_items]
+    return out
+
+
+def _gather_snippet_evidence_for_true_base(
+    true_base: str,
+    *,
+    true_base_to_pathful_map: Dict[str, List[str]],
+    canonical_site_regex_candidate_items: Dict[str, List[Dict[str, Any]]],
+    max_snippets_per_number: int = 3,
+    max_chars_per_excerpt: int = 220,
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    Gather short snippet excerpts per candidate number across the true_base's pathful pages.
+    This is used only for the second-stage ranking LLM to help detect "other org" contacts.
+    """
+    out: Dict[str, List[Dict[str, str]]] = {}
+    try:
+        pathfuls = true_base_to_pathful_map.get(str(true_base), []) or []
+        seen_per_num: Dict[str, Set[str]] = {}
+        for p in pathfuls:
+            for it in (canonical_site_regex_candidate_items.get(p, []) or []):
+                num = (it.get("candidate_number") or it.get("number") or "").strip()
+                if not num:
+                    continue
+                excerpt = (it.get("snippet") or "").strip()
+                if not excerpt:
+                    continue
+                if len(excerpt) > max_chars_per_excerpt:
+                    excerpt = excerpt[: max_chars_per_excerpt - 1].rstrip() + "…"
+                src = (it.get("source_url") or "").strip() or p
+                key = f"{src}::{excerpt}"
+                if num not in seen_per_num:
+                    seen_per_num[num] = set()
+                if key in seen_per_num[num]:
+                    continue
+                seen_per_num[num].add(key)
+                out.setdefault(num, []).append({"source_url": src, "excerpt": excerpt})
+                if len(out[num]) >= max_snippets_per_number:
+                    continue
+        return out
+    except Exception:
+        return out
 
 
 def _rank_and_cap_llm_candidates(items: List[Dict[str, Any]], app_config: AppConfig) -> List[Dict[str, Any]]:
@@ -192,6 +408,10 @@ def _rank_and_cap_llm_candidates(items: List[Dict[str, Any]], app_config: AppCon
     if not items:
         return []
     max_total = int(getattr(app_config, "phone_llm_max_candidates_total", 120) or 120)
+    # Filter out extremely low-signal candidates to reduce LLM cost/noise.
+    # If filtering would remove everything, we fall back to the unfiltered ranking.
+    # Default is 0 (disabled) to avoid accidentally suppressing legitimate numbers.
+    min_score = int(getattr(app_config, "phone_llm_min_candidate_score", 0) or 0)
     prefer_paths = set((getattr(app_config, "phone_llm_prefer_url_path_keywords", []) or []))
     prefer_snip = set((getattr(app_config, "phone_llm_prefer_snippet_keywords", []) or []))
 
@@ -228,6 +448,11 @@ def _rank_and_cap_llm_candidates(items: List[Dict[str, Any]], app_config: AppCon
         deduped.append(it)
 
     deduped.sort(key=score, reverse=True)
+    if min_score > 0:
+        filtered = [it for it in deduped if score(it) >= min_score]
+        # Only apply the filter if we still have something to send.
+        if filtered:
+            deduped = filtered
     if max_total > 0:
         deduped = deduped[:max_total]
     return deduped
@@ -273,6 +498,10 @@ def _load_phone_results_from_cache(true_base: str, app_config: AppConfig) -> Opt
                         source_path=s.get("source_path") or "",
                         original_full_url=s.get("original_full_url") or "",
                         original_input_company_name=s.get("original_input_company_name"),
+                        associated_person_name=s.get("associated_person_name"),
+                        associated_person_role=s.get("associated_person_role"),
+                        associated_person_department=s.get("associated_person_department"),
+                        is_direct_dial=s.get("is_direct_dial"),
                     )
                     for s in (it.get("sources") or [])
                 ]
@@ -327,6 +556,10 @@ def _save_phone_results_to_cache(true_base: str, bundle: DomainExtractionBundle,
                             "source_path": s.source_path,
                             "original_full_url": s.original_full_url,
                             "original_input_company_name": s.original_input_company_name,
+                            "associated_person_name": getattr(s, "associated_person_name", None),
+                            "associated_person_role": getattr(s, "associated_person_role", None),
+                            "associated_person_department": getattr(s, "associated_person_department", None),
+                            "is_direct_dial": getattr(s, "is_direct_dial", None),
                         }
                         for s in (n.sources or [])
                     ],
@@ -376,6 +609,8 @@ def execute_pipeline_flow(
     canonical_site_regex_candidates_found_status: Dict[str, bool] = {}
     # canonical_site_llm_exception_details: Stores specific LLM exception details per *pathful* canonical URL
     canonical_site_llm_exception_details: Dict[str, str] = {}
+    # Per-domain cache for second-stage LLM ranking results (avoid re-ranking for duplicate domains within a run).
+    true_base_phone_ranking_cache: Dict[str, PhoneRankingOutput] = {}
     # canonical_site_regex_candidate_items: Stores regex candidate dicts per *pathful* canonical URL
     canonical_site_regex_candidate_items: Dict[str, List[Dict[str, Any]]] = {}
     # canonical_site_llm_context_paths: Stores context artifact paths per *pathful* canonical URL
@@ -990,17 +1225,177 @@ def execute_pipeline_flow(
         df.at[index, 'Final_Row_Outcome_Reason'] = final_reason
         df.at[index, 'Determined_Fault_Category'] = fault_category
 
-        # Populate Top Numbers (operational call list)
-        ranked_for_outreach = _rank_consolidated_numbers_for_outreach(unique_sorted_consolidated_numbers)
+        # Clear per-row selection outputs to avoid leaking stale values from input/resume files.
+        # (We will repopulate these below when/if reranking succeeds.)
+        for i in (1, 2, 3):
+            if f"Top_Number_{i}" in df.columns:
+                df.at[index, f"Top_Number_{i}"] = None
+            if f"Top_Type_{i}" in df.columns:
+                df.at[index, f"Top_Type_{i}"] = None
+            if f"Top_SourceURL_{i}" in df.columns:
+                df.at[index, f"Top_SourceURL_{i}"] = None
+        for k in (
+            "MainOffice_Number",
+            "MainOffice_Type",
+            "MainOffice_SourceURL",
+            "LLMPhoneRanking",
+            "LLMPhoneRankingError",
+            "DeprioritizedNumbers",
+            "SuspectedOtherOrgNumbers",
+        ):
+            if k in df.columns:
+                df.at[index, k] = None
+
+        # Populate Top Numbers (operational call list).
+        # IMPORTANT: "Top_Number_1..3" are now **LLM-reranker only**.
+        # - If the reranker is disabled, fails, or returns no ranked numbers, we leave Top_* blank.
+        # - We do NOT fall back to legacy heuristic scoring/ranking.
+        callable_numbers: List[ConsolidatedPhoneNumber] = []
+        for n in unique_sorted_consolidated_numbers:
+            types_csv_tmp, _ = _summarize_sources_for_number(n)
+            if "fax" in (types_csv_tmp or "").lower():
+                continue
+            if (n.classification or "").strip().lower() == "non-business":
+                continue
+            callable_numbers.append(n)
+
+        ranked_for_outreach: List[ConsolidatedPhoneNumber] = []
+        ranking_obj: Optional[PhoneRankingOutput] = None
+        rank_item_by_num: Dict[str, Any] = {}
+        rerank_ctx_paths: List[str] = []
+        true_base_key = str(canonical_url_summary).strip() if canonical_url_summary else ""
+        if callable_numbers and getattr(app_config, "enable_phone_llm_rerank", True) and true_base_key:
+            rerank_file_prefix = f"TRUEBASE_{sanitize_filename_component(true_base_key)}"
+            # These are the standard artifacts saved by the reranker call (best-effort).
+            rerank_base = sanitize_filename_component(rerank_file_prefix)
+            rerank_ctx_paths = [
+                os.path.join(llm_context_dir, f"{rerank_base}__phone_ranking_prompt.txt"),
+                os.path.join(llm_context_dir, f"{rerank_base}__phone_ranking_raw_output.txt"),
+                os.path.join(llm_context_dir, f"{rerank_base}__phone_ranking_error.txt"),
+            ]
+            if true_base_key in true_base_phone_ranking_cache:
+                ranking_obj = true_base_phone_ranking_cache.get(true_base_key)
+            else:
+                snippet_map = _gather_snippet_evidence_for_true_base(
+                    true_base_key,
+                    true_base_to_pathful_map=true_base_to_pathful_map,
+                    canonical_site_regex_candidate_items=canonical_site_regex_candidate_items,
+                    max_snippets_per_number=3,
+                    max_chars_per_excerpt=220,
+                )
+                candidates_payload = _build_phone_rerank_candidates(callable_numbers, app_config, snippet_map)
+                ranking_obj, _raw, rerank_err = llm_extractor.rank_phone_numbers_for_outreach(
+                    company_name=company_name_for_attrition,
+                    canonical_base_url=true_base_key,
+                    candidates=candidates_payload,
+                    llm_context_dir=llm_context_dir,
+                    file_identifier_prefix=rerank_file_prefix,
+                    triggering_input_row_id=index,
+                )
+                if rerank_err and "LLMPhoneRankingError" in df.columns:
+                    df.at[index, "LLMPhoneRankingError"] = rerank_err
+                if ranking_obj:
+                    true_base_phone_ranking_cache[true_base_key] = ranking_obj
+
+            # Only keep rerank artifact paths that actually exist, to avoid confusing audits.
+            # (Error file is only created on failure.)
+            try:
+                rerank_ctx_paths = [p for p in (rerank_ctx_paths or []) if p and os.path.exists(p)]
+            except Exception:
+                rerank_ctx_paths = []
+
+            if ranking_obj:
+                by_number: Dict[str, ConsolidatedPhoneNumber] = {n.number: n for n in callable_numbers if n.number}
+                # Build Top_1..3 from the LLM ranking order, but skip "Low Value" items.
+                # We still keep the full LLM ranking JSON for diagnostics/auditing.
+                for item in (ranking_obj.ranked_numbers or []):
+                    if not item or not getattr(item, "number", None):
+                        continue
+                    n_obj = by_number.get(str(item.number).strip())
+                    if not n_obj:
+                        continue
+                    try:
+                        pr = (getattr(item, "priority_label", None) or "").strip().lower()
+                    except Exception:
+                        pr = ""
+                    if pr == "low value":
+                        continue
+                    rank_item_by_num[n_obj.number] = item
+                    ranked_for_outreach.append(n_obj)
+                    if len(ranked_for_outreach) >= 3:
+                        break
+
+                # Persist full reranker output for diagnostics/auditing, even if it selected no Top numbers.
+                try:
+                    df.at[index, "LLMPhoneRanking"] = (ranking_obj.model_dump() if hasattr(ranking_obj, "model_dump") else dict(ranking_obj))
+                except Exception:
+                    df.at[index, "LLMPhoneRanking"] = None
+
+                # Dedicated Main Office / generic company line backup (if LLM identified one)
+                try:
+                    mo_num = (ranking_obj.main_office_backup_number or "").strip() if ranking_obj else ""
+                except Exception:
+                    mo_num = ""
+                if mo_num:
+                    mo_obj = by_number.get(mo_num)
+                    if mo_obj:
+                        _t, mo_urls = _summarize_sources_for_number(mo_obj)
+                        df.at[index, "MainOffice_Number"] = mo_obj.number
+                        df.at[index, "MainOffice_Type"] = (ranking_obj.main_office_backup_type or "Main Office") if ranking_obj else "Main Office"
+                        df.at[index, "MainOffice_SourceURL"] = mo_urls or None
+
+                # Deprioritized-but-callable numbers (still worth a try, but not top outreach picks)
+                try:
+                    deprios = []
+                    for it in (getattr(ranking_obj, "deprioritized_numbers", None) or []):
+                        num = (getattr(it, "number", None) or "").strip()
+                        if not num or num not in by_number:
+                            continue
+                        deprios.append(num)
+                    # de-dupe while preserving order
+                    seen_d = set()
+                    deprios = [n for n in deprios if not (n in seen_d or seen_d.add(n))]
+                    df.at[index, "DeprioritizedNumbers"] = "; ".join(deprios) if deprios else None
+                except Exception:
+                    df.at[index, "DeprioritizedNumbers"] = None
+
+                # Numbers that look like they belong to another organization/entity (do not call)
+                try:
+                    other_org = []
+                    for it in (getattr(ranking_obj, "suspected_other_org_numbers", None) or []):
+                        num = (getattr(it, "number", None) or "").strip()
+                        if not num or num not in by_number:
+                            continue
+                        other_org.append(num)
+                    seen_o = set()
+                    other_org = [n for n in other_org if not (n in seen_o or seen_o.add(n))]
+                    df.at[index, "SuspectedOtherOrgNumbers"] = "; ".join(other_org) if other_org else None
+                except Exception:
+                    df.at[index, "SuspectedOtherOrgNumbers"] = None
+
         if ranked_for_outreach:
             for i, top_item in enumerate(ranked_for_outreach[:3]):
                 df.at[index, f'Top_Number_{i+1}'] = top_item.number
-                df.at[index, f'Top_Type_{i+1}'] = ", ".join(sorted(list(set(s.type for s in top_item.sources if s.type))))
-                df.at[index, f'Top_SourceURL_{i+1}'] = ", ".join(sorted(list(set(s.original_full_url for s in top_item.sources))))
+                # Prefer the LLM-ranked type if present; else summarize from sources.
+                chosen_type = None
+                try:
+                    if ranking_obj and "rank_item_by_num" in locals():
+                        it = rank_item_by_num.get(top_item.number)
+                        if it is not None:
+                            chosen_type = (getattr(it, "type", None) or "").strip()
+                except Exception:
+                    chosen_type = None
+                types_csv, urls_csv = _summarize_sources_for_number(top_item)
+                df.at[index, f'Top_Type_{i+1}'] = chosen_type or types_csv or "Unknown"
+                df.at[index, f'Top_SourceURL_{i+1}'] = urls_csv
 
         # Populate Primary_/Secondary_ legacy columns from consolidated numbers.
+        # IMPORTANT: These are diagnostics/back-compat columns. We allow fax to appear here
+        # (but it is penalized and never used as a callable "Top" number).
         primary_items = [n for n in unique_sorted_consolidated_numbers if (n.classification or "").strip() == "Primary"]
         secondary_items = [n for n in unique_sorted_consolidated_numbers if (n.classification or "").strip() == "Secondary"]
+        primary_items = _rank_consolidated_numbers_for_diagnostics(primary_items)
+        secondary_items = _rank_consolidated_numbers_for_diagnostics(secondary_items)
         if primary_items:
             types_csv, urls_csv = _summarize_sources_for_number(primary_items[0])
             df.at[index, "Primary_Number_1"] = primary_items[0].number
@@ -1050,24 +1445,40 @@ def execute_pipeline_flow(
         ctx_paths: List[str] = []
         for p in pathfuls:
             ctx_paths.extend(canonical_site_llm_context_paths.get(p, []) or [])
+        # Also attach reranker artifacts (prompt/raw/error) when reranking was attempted.
+        ctx_paths.extend(rerank_ctx_paths or [])
         # De-dupe while preserving order
         seen = set()
         ctx_paths = [x for x in ctx_paths if x and not (x in seen or seen.add(x))]
         df.at[index, "LLMContextPath"] = "; ".join(ctx_paths)
 
-        # Simple confidence heuristic based on the best consolidated number classification.
-        best_obj = unique_sorted_consolidated_numbers[0] if unique_sorted_consolidated_numbers else None
-        df.at[index, "ConfidenceScore"] = _confidence_for_best(best_obj)
-
         # Person-associated contacts (optional)
         contacts = _extract_person_contacts(unique_sorted_consolidated_numbers)
         df.at[index, "PersonContacts"] = contacts
-        best_contact = _pick_best_person_contact(contacts)
-        if best_contact:
-            df.at[index, "BestPersonContactName"] = best_contact.get("name")
-            df.at[index, "BestPersonContactRole"] = best_contact.get("role")
-            df.at[index, "BestPersonContactDepartment"] = best_contact.get("department")
-            df.at[index, "BestPersonContactNumber"] = best_contact.get("number")
+        # Prefer the reranker-selected person contact (if provided); otherwise fall back to local selection.
+        rerank_person = None
+        if ranking_obj:
+            # Prefer a person contact that is actually in Top_1..3 (and not filtered as Low Value).
+            for top_n in ranked_for_outreach[:3]:
+                it = rank_item_by_num.get(getattr(top_n, "number", None))
+                if it is None:
+                    continue
+                nm = getattr(it, "associated_person_name", None)
+                if nm:
+                    rerank_person = it
+                    break
+        if rerank_person:
+            df.at[index, "BestPersonContactName"] = getattr(rerank_person, "associated_person_name", None)
+            df.at[index, "BestPersonContactRole"] = getattr(rerank_person, "associated_person_role", None)
+            df.at[index, "BestPersonContactDepartment"] = getattr(rerank_person, "associated_person_department", None)
+            df.at[index, "BestPersonContactNumber"] = getattr(rerank_person, "number", None)
+        else:
+            best_contact = _pick_best_person_contact(contacts)
+            if best_contact:
+                df.at[index, "BestPersonContactName"] = best_contact.get("name")
+                df.at[index, "BestPersonContactRole"] = best_contact.get("role")
+                df.at[index, "BestPersonContactDepartment"] = best_contact.get("department")
+                df.at[index, "BestPersonContactNumber"] = best_contact.get("number")
 
         # --- Live streaming to master (optional) ---
         if row_queue is not None:

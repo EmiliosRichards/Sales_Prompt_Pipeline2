@@ -310,6 +310,16 @@ class AppConfig:
             "Industry": "Industry",
             "_original_phone_column_name": "Company Phone"
         }
+        ,
+        # Stitched results input: data/results_stitched.csv (comma-delimited)
+        # Contains at least: firma, website, input_url, model_score, etc.
+        # We intentionally map ONLY `website` -> GivenURL (to avoid duplicate GivenURL columns
+        # because the file also contains `input_url`, typically identical).
+        "results_stitched": {
+            "firma": "CompanyName",
+            "website": "GivenURL",
+            "_original_phone_column_name": None
+        }
     }
 
     def __init__(self,
@@ -489,10 +499,18 @@ class AppConfig:
         self.extraction_profile: str = os.getenv('EXTRACTION_PROFILE', "minimal")
         self.prompt_path_homepage_context: str = get_clean_path('PROMPT_PATH_HOMEPAGE_CONTEXT', 'prompts/homepage_context_prompt.txt')
         self.PROMPT_PATH_WEBSITE_SUMMARIZER: str = get_clean_path('PROMPT_PATH_WEBSITE_SUMMARIZER', 'prompts/website_summarizer_prompt.txt')
+        # Used when --pitch-from-description is enabled: create a short, German human-readable summary from input description fields.
+        self.PROMPT_PATH_GERMAN_SHORT_SUMMARY_FROM_DESCRIPTION: str = get_clean_path(
+            'PROMPT_PATH_GERMAN_SHORT_SUMMARY_FROM_DESCRIPTION',
+            'prompts/german_short_summary_from_description_prompt.txt'
+        )
         self.PROMPT_PATH_ATTRIBUTE_EXTRACTOR: str = get_clean_path('PROMPT_PATH_ATTRIBUTE_EXTRACTOR', 'prompts/attribute_extractor_prompt.txt')
         self.prompt_path_minimal_classification: str = get_clean_path('PROMPT_PATH_MINIMAL_CLASSIFICATION', 'prompts/b2b_capacity_check_prompt.txt')
         self.prompt_path_enriched_extraction: str = get_clean_path('PROMPT_PATH_ENRICHED_EXTRACTION', 'prompts/profile_2.txt')
         self.LLM_MAX_INPUT_CHARS_FOR_SUMMARY: int = int(os.getenv('LLM_MAX_INPUT_CHARS_FOR_SUMMARY', '40000'))
+        # Separate bound for "description -> German short summary" to keep reruns cheap.
+        self.LLM_MAX_INPUT_CHARS_FOR_DESCRIPTION_DE_SUMMARY: int = int(os.getenv('LLM_MAX_INPUT_CHARS_FOR_DESCRIPTION_DE_SUMMARY', '12000'))
+        self.llm_max_tokens_description_de_summary: int = int(os.getenv('LLM_MAX_TOKENS_DESCRIPTION_DE_SUMMARY', '256'))
         
         # --- Language-Specific Prompt Configuration ---
         self.sales_prompt_language: str = os.getenv('SALES_PROMPT_LANGUAGE', 'en').lower()
@@ -540,6 +558,12 @@ class AppConfig:
         self.reuse_phone_results_if_available: bool = os.getenv("REUSE_PHONE_RESULTS_IF_AVAILABLE", "False").lower() == "true"
         # Use an env override when provided; otherwise default to a stable local folder (not dependent on output_base_dir init order).
         self.phone_results_cache_dir: str = os.path.normpath(os.getenv("PHONE_RESULTS_CACHE_DIR", "cache/phone_results_cache"))
+
+        # --- Second-stage Phone Ranking (LLM) ---
+        # When True, a second LLM call ranks callable business numbers into Top_Number_1..3
+        # and selects a Main Office backup number (when present).
+        self.enable_phone_llm_rerank: bool = os.getenv("ENABLE_PHONE_LLM_RERANK", "True").lower() == "true"
+        self.phone_llm_rerank_max_candidates: int = int(os.getenv("PHONE_LLM_RERANK_MAX_CANDIDATES", "25") or 25)
 
         # --- Data Handling & Input Profiling ---
         self.input_excel_file_path: str = input_file_override or os.getenv('INPUT_EXCEL_FILE_PATH', 'data_to_be_inputed.xlsx')  # Relative to project root

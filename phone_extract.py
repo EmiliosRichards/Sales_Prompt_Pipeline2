@@ -398,10 +398,8 @@ def _build_augmented_row_from_processed(
         "RegexCandidateSnippets",
         "BestMatchedPhoneNumbers",
         "OtherRelevantNumbers",
-        "ConfidenceScore",
         "LLMExtractedNumbers",
         "LLMContextPath",
-        "Notes",
         "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
         "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
         "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
@@ -716,9 +714,41 @@ def _write_augmented_csv(
         return s
 
     # Grab fields from processed_df (which may have been merged from workers).
-    top1 = processed_df["Top_Number_1"] if "Top_Number_1" in processed_df.columns else pd.Series([None] * len(processed_df))
-    top1_type = processed_df["Top_Type_1"] if "Top_Type_1" in processed_df.columns else pd.Series([None] * len(processed_df))
-    top1_src = processed_df["Top_SourceURL_1"] if "Top_SourceURL_1" in processed_df.columns else pd.Series([None] * len(processed_df))
+    # Choose the best callable number. Never export fax as PhoneNumber_Found.
+    def _is_fax_label(v: Any) -> bool:
+        s = ("" if v is None else str(v)).strip().lower()
+        return "fax" in s or "telefax" in s
+
+    def _pick_best_callable_row(row: pd.Series) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        for i in (1, 2, 3):
+            num = row.get(f"Top_Number_{i}")
+            typ = row.get(f"Top_Type_{i}")
+            src = row.get(f"Top_SourceURL_{i}")
+            if _is_fax_label(typ):
+                continue
+            s = _as_str_or_none(num)
+            if s and s.lower() not in {"nan", "none", "null"}:
+                return num, typ, src
+        # Fallback: if the pipeline could not extract/rank any callable numbers, carry forward
+        # the best available input number so downstream workflows don't "lose" a usable phone.
+        # Prefer NormalizedGivenPhoneNumber when present.
+        fallback_num = row.get("NormalizedGivenPhoneNumber")
+        if _as_str_or_none(fallback_num):
+            return fallback_num, "Input", "input:Company Phone"
+        fallback_num = row.get("GivenPhoneNumber")
+        if _as_str_or_none(fallback_num):
+            return fallback_num, "Input", "input:Company Phone"
+        return None, None, None
+
+    picked = processed_df.apply(_pick_best_callable_row, axis=1) if len(processed_df) else []
+    if len(processed_df):
+        top1 = pd.Series([t[0] for t in picked])
+        top1_type = pd.Series([t[1] for t in picked])
+        top1_src = pd.Series([t[2] for t in picked])
+    else:
+        top1 = pd.Series([None] * len(processed_df))
+        top1_type = pd.Series([None] * len(processed_df))
+        top1_src = pd.Series([None] * len(processed_df))
     outcome = processed_df["Final_Row_Outcome_Reason"] if "Final_Row_Outcome_Reason" in processed_df.columns else pd.Series([None] * len(processed_df))
     fault = processed_df["Determined_Fault_Category"] if "Determined_Fault_Category" in processed_df.columns else pd.Series([None] * len(processed_df))
     http_fb_attempted = processed_df["HttpFallbackAttempted"] if "HttpFallbackAttempted" in processed_df.columns else pd.Series([None] * len(processed_df))
@@ -757,10 +787,20 @@ def _write_augmented_csv(
         "RegexCandidateSnippets",
         "BestMatchedPhoneNumbers",
         "OtherRelevantNumbers",
-        "ConfidenceScore",
         "LLMExtractedNumbers",
         "LLMContextPath",
-        "Notes",
+        # Person-associated contacts (optional; populated when the phone LLM links a number to a person/role).
+        "BestPersonContactName",
+        "BestPersonContactRole",
+        "BestPersonContactDepartment",
+        "BestPersonContactNumber",
+        "PersonContacts",
+        "MainOffice_Number", "MainOffice_Type", "MainOffice_SourceURL",
+        "LLMPhoneRanking",
+        "LLMPhoneRankingError",
+        # Callable but deprioritized and "suspected other-org" buckets (second-stage reranker output)
+        "DeprioritizedNumbers",
+        "SuspectedOtherOrgNumbers",
         "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
         "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
         "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
@@ -853,10 +893,19 @@ def main() -> None:
         "RegexCandidateSnippets",
         "BestMatchedPhoneNumbers",
         "OtherRelevantNumbers",
-        "ConfidenceScore",
         "LLMExtractedNumbers",
         "LLMContextPath",
-        "Notes",
+        # Person-associated contacts (optional; populated when the phone LLM links a number to a person/role).
+        "BestPersonContactName",
+        "BestPersonContactRole",
+        "BestPersonContactDepartment",
+        "BestPersonContactNumber",
+        "PersonContacts",
+        "MainOffice_Number", "MainOffice_Type", "MainOffice_SourceURL",
+        "LLMPhoneRanking",
+        "LLMPhoneRankingError",
+        "DeprioritizedNumbers",
+        "SuspectedOtherOrgNumbers",
         "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
         "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
         "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
@@ -899,10 +948,19 @@ def main() -> None:
         "RegexCandidateSnippets",
         "BestMatchedPhoneNumbers",
         "OtherRelevantNumbers",
-        "ConfidenceScore",
         "LLMExtractedNumbers",
         "LLMContextPath",
-        "Notes",
+        # Person-associated contacts (optional; populated when the phone LLM links a number to a person/role).
+        "BestPersonContactName",
+        "BestPersonContactRole",
+        "BestPersonContactDepartment",
+        "BestPersonContactNumber",
+        "PersonContacts",
+        "MainOffice_Number", "MainOffice_Type", "MainOffice_SourceURL",
+        "LLMPhoneRanking",
+        "LLMPhoneRankingError",
+        "DeprioritizedNumbers",
+        "SuspectedOtherOrgNumbers",
         "Top_Number_1", "Top_Type_1", "Top_SourceURL_1",
         "Top_Number_2", "Top_Type_2", "Top_SourceURL_2",
         "Top_Number_3", "Top_Type_3", "Top_SourceURL_3",
@@ -1036,6 +1094,42 @@ def main() -> None:
         _write_augmented_csv(input_file_path_abs, start_1based, processed_df, augmented_path)
         if os.path.exists(augmented_path):
             logger.info(f"Wrote augmented input CSV: {augmented_path}")
+
+        # Cleanup: remove *_live.* files after confirming stable outputs exist, so we don't lose data.
+        def _is_nonempty_file(p: str) -> bool:
+            try:
+                return os.path.exists(p) and os.path.getsize(p) > 0
+            except Exception:
+                return False
+
+        def _safe_delete(p: str) -> None:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                # Best-effort cleanup only; never fail the run due to cleanup.
+                pass
+
+        stable_results_csv = os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.csv")
+        stable_results_jsonl = os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.jsonl")
+        stable_aug_csv = os.path.join(run_output_dir, f"input_augmented_{master_run_id}.csv")
+        stable_aug_jsonl = os.path.join(run_output_dir, f"input_augmented_{master_run_id}.jsonl")
+
+        required_for_cleanup = [
+            stable_results_csv,
+            stable_results_jsonl,
+            stable_aug_csv,
+            stable_aug_jsonl,
+        ]
+        if all(_is_nonempty_file(p) for p in required_for_cleanup):
+            _safe_delete(live_results_csv)
+            _safe_delete(live_results_jsonl)
+            _safe_delete(live_aug_csv)
+            _safe_delete(live_aug_jsonl)
+            _safe_delete(live_status_path)
+            logger.info("Cleaned up live output files after successful final+merged writes.")
+        else:
+            logger.warning("Skipping live output cleanup because not all final artifacts exist yet.")
         return
 
     total_rows = _infer_total_rows(input_file_path_abs)
@@ -1171,6 +1265,47 @@ def main() -> None:
     _write_augmented_csv(input_file_path_abs, start_1based, merged_df, augmented_path)
     if os.path.exists(augmented_path):
         logger.info(f"Wrote augmented input CSV: {augmented_path}")
+
+    # Cleanup: remove *_live.* files after confirming stable outputs exist, so we don't lose data.
+    def _is_nonempty_file(p: str) -> bool:
+        try:
+            return os.path.exists(p) and os.path.getsize(p) > 0
+        except Exception:
+            return False
+
+    def _safe_delete(p: str) -> None:
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            # Best-effort cleanup only; never fail the run due to cleanup.
+            pass
+
+    # Required stable artifacts before deleting live files.
+    stable_results_csv = os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.csv")
+    stable_results_jsonl = os.path.join(run_output_dir, f"phone_extraction_results_{master_run_id}.jsonl")
+    stable_aug_csv = os.path.join(run_output_dir, f"input_augmented_{master_run_id}.csv")
+    stable_aug_jsonl = os.path.join(run_output_dir, f"input_augmented_{master_run_id}.jsonl")
+    merged_jsonl_path = os.path.splitext(merged_output_path)[0] + ".jsonl"
+
+    required_for_cleanup = [
+        stable_results_csv,
+        stable_results_jsonl,
+        merged_output_path,
+        merged_jsonl_path,
+        stable_aug_csv,
+        stable_aug_jsonl,
+    ]
+    if all(_is_nonempty_file(p) for p in required_for_cleanup):
+        _safe_delete(live_results_csv)
+        _safe_delete(live_results_jsonl)
+        _safe_delete(live_aug_csv)
+        _safe_delete(live_aug_jsonl)
+        _safe_delete(live_status_path)
+        logger.info("Cleaned up live output files after successful final+merged writes.")
+    else:
+        logger.warning("Skipping live output cleanup because not all final artifacts exist yet.")
+
     logger.info(f"Total duration: {time.time() - pipeline_start_time:.2f}s")
 
 

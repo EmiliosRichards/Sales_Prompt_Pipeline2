@@ -1,4 +1,5 @@
 import csv
+import json
 import logging
 import os
 from typing import List, Dict, Any
@@ -43,7 +44,15 @@ class LiveCsvReporter:
         """
         try:
             # Create a list of values in the same order as the header
-            row_values = [row_data.get(h, '') for h in self.header]
+            row_values = []
+            for h in self.header:
+                v = row_data.get(h, '')
+                if isinstance(v, (dict, list)):
+                    try:
+                        v = json.dumps(v, ensure_ascii=False)
+                    except Exception:
+                        v = str(v)
+                row_values.append(v)
             with open(self.filepath, 'a', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
                 writer.writerow(row_values)

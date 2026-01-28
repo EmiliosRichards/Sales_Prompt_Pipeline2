@@ -4,6 +4,7 @@ Regex-based Phone Number Extraction Component
 
 import logging
 from typing import List, Optional, Set, Dict
+import re
 
 import phonenumbers
 from phonenumbers import PhoneNumberFormat, PhoneNumberMatcher
@@ -15,6 +16,34 @@ DEFAULT_REGION = "US"
 MIN_NSN_LENGTH = 7
 MAX_REPEATING_DIGITS = 4
 MAX_SEQUENTIAL_DIGITS = 4
+
+
+def _looks_like_date(raw: str) -> bool:
+    """
+    Heuristic guardrail: phonenumbers can sometimes treat date-like strings as valid local numbers
+    (e.g. "02.01.2026" -> a plausible NSN). These are almost always false positives in scraped text.
+
+    We only filter when we can confidently parse a DD.MM.YYYY / DD/MM/YYYY / DD-MM-YYYY pattern
+    with plausible ranges.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return False
+    m = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b", s)
+    if not m:
+        return False
+    try:
+        d = int(m.group(1))
+        mo = int(m.group(2))
+        y = int(m.group(3))
+        if y < 100:
+            # Interpret 2-digit years as 20xx for plausibility checks only.
+            y = 2000 + y
+        if 1900 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def _is_placeholder_number(number_str: str) -> bool:
@@ -208,6 +237,11 @@ def extract_numbers_with_snippets_from_text(
     try:
         for match in PhoneNumberMatcher(text_content, region=default_parse_region):
             number_obj = match.number
+
+            # Skip obvious date-like strings (common false positive in scraped content).
+            if _looks_like_date(match.raw_string):
+                logger.debug(f"Skipping date-like match '{match.raw_string}' from {source_url}.")
+                continue
             
             if not phonenumbers.is_valid_number(number_obj):
                 logger.debug(f"Number '{phonenumbers.format_number(number_obj, PhoneNumberFormat.E164)}' (raw: {match.raw_string}) from {source_url} is invalid by basic check.")
