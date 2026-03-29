@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import time
+import atexit
+import sys
 import queue as pyqueue
 import threading
 import multiprocessing as mp
@@ -33,6 +35,7 @@ from dotenv import load_dotenv
 
 from src.core.config import AppConfig
 from src.core.logging_config import setup_logging
+from src.llm_clients.backpressure import effective_worker_count
 from src.phone_retrieval.data_handling.normalizer import normalize_phone_number
 from src.phone_retrieval.data_handling.loader import load_and_preprocess_data
 from src.phone_retrieval.extractors.llm_extractor import GeminiLLMExtractor
@@ -44,6 +47,7 @@ from src.phone_retrieval.utils.helpers import (
     initialize_run_metrics,
     resolve_path,
 )
+from src.reporting.run_manifest import start_run_manifest, finalize_run_manifest, ManifestHandle
 
 # Load .env but do NOT override environment variables already set by the shell.
 # This allows easy per-run overrides (e.g., prompt paths) without editing .env.
@@ -827,13 +831,20 @@ def _write_augmented_csv(
 def main() -> None:
     args = _parse_args()
     pipeline_start_time = time.time()
+    manifest_handle: Optional[ManifestHandle] = None
+    manifest_finalized: bool = False
+    manifest_errors: List[str] = []
 
-    app_config = AppConfig(
-        input_file_override=args.input_file,
-        row_range_override=args.range or None,
-        run_id_suffix_override=args.suffix,
-        test_mode=False,
-    )
+    try:
+        app_config = AppConfig(
+            input_file_override=args.input_file,
+            row_range_override=args.range or None,
+            run_id_suffix_override=args.suffix,
+            test_mode=False,
+        )
+    except ValueError as config_error:
+        print(f"Configuration error: {config_error}")
+        return
     if getattr(args, "input_profile", None):
         app_config.input_file_profile_name = args.input_profile
 
@@ -856,7 +867,53 @@ def main() -> None:
     if not os.path.exists(input_file_path_abs):
         raise FileNotFoundError(f"Input file not found: {input_file_path_abs}")
 
-    workers = max(1, int(args.workers or 1))
+    # --- Run manifest start (best-effort audit trail) ---
+    try:
+        manifest_handle = start_run_manifest(
+            run_output_dir=run_output_dir,
+            run_id=master_run_id,
+            pipeline_name="phone_extract",
+            argv=list(sys.argv),
+            run_command=" ".join(sys.argv),
+            args_obj=args,
+            app_config=app_config,
+            input_file_abs=input_file_path_abs,
+            extra={
+                "input_profile": getattr(app_config, "input_file_profile_name", None),
+            },
+        )
+    except Exception:
+        manifest_handle = None
+
+    def _finalize_manifest(status: str) -> None:
+        nonlocal manifest_finalized
+        if manifest_finalized:
+            return
+        manifest_finalized = True
+        try:
+            if manifest_handle:
+                finalize_run_manifest(
+                    handle=manifest_handle,
+                    status=status,
+                    run_metrics=None,
+                    errors=manifest_errors if manifest_errors else None,
+                )
+        except Exception:
+            pass
+
+    # If the process exits due to an unhandled exception, attempt to mark the run as failed.
+    # This is best-effort only (won't run on hard-kills).
+    atexit.register(lambda: _finalize_manifest("failed"))
+
+    requested_workers = max(1, int(args.workers or 1))
+    workers = effective_worker_count(app_config, app_config.phone_llm_provider, requested_workers)
+    if workers != requested_workers:
+        logger.warning(
+            "Clamping phone extraction workers from %s to %s for provider '%s' backpressure.",
+            requested_workers,
+            workers,
+            app_config.phone_llm_provider,
+        )
 
     # Determine input header + profile mapping for consistent augmented output.
     input_header: List[str] = []
@@ -1130,6 +1187,7 @@ def main() -> None:
             logger.info("Cleaned up live output files after successful final+merged writes.")
         else:
             logger.warning("Skipping live output cleanup because not all final artifacts exist yet.")
+        _finalize_manifest("completed")
         return
 
     total_rows = _infer_total_rows(input_file_path_abs)
@@ -1307,6 +1365,7 @@ def main() -> None:
         logger.warning("Skipping live output cleanup because not all final artifacts exist yet.")
 
     logger.info(f"Total duration: {time.time() - pipeline_start_time:.2f}s")
+    _finalize_manifest("completed")
 
 
 if __name__ == "__main__":

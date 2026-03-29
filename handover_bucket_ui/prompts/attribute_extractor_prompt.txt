@@ -1,0 +1,28 @@
+First, think step-by-step. Analyze the provided [Website Summary Text] and meticulously plan how to extract each required attribute. For each field in the JSON structure, identify the specific sentences or phrases in the summary that provide the necessary information. After forming a clear internal plan for each attribute, generate ONLY the final JSON object as your response.
+Your primary task is to analyze the provided [Website Summary Text] and extract detailed company attributes. Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text whatsoever outside of this JSON structure. Your response must begin with '{' and end with '}'.
+
+Based on the [Website Summary Text], extract the following information:
+
+*   `input_summary_url`: "[Placeholder for the original URL of the company - this will be filled programmatically, do not generate it. Your focus is on the attributes below based on the summary.]"
+*   `b2b_indicator`: (boolean) True if the company primarily serves other businesses (B2B), False if primarily private customers (B2C), or null if unclear from the summary.
+*   `phone_outreach_suitability`: (boolean) True if the company's product/service, as described in the summary, seems suitable for telephone-based acquisition, False otherwise, or null if unclear.
+*   `target_group_size_assessment`: (string) Provide a qualitative assessment of the potential callable target group size based on the summary. Examples: "Appears Small", "Appears Medium", "Appears Large / >=500 potential", "Unknown".
+*   `industry`: (string or null) The primary industry of the company as inferred from the summary.
+*   `products_services_offered`: (list of strings or empty list) List key products or services mentioned in the summary.
+*   `usp_key_selling_points`: (list of strings or empty list) List Unique Selling Propositions or key selling points highlighted in the summary.
+*   `customer_target_segments`: (list of strings or empty list) List specific customer segments targeted by the company, according to the summary.
+*   `business_model`: (string or null) Describe the company's business model as understood from the summary (e.g., "Service-oriented; Project-based consulting", "SaaS provider").
+*   `company_size_indicators_text`: (string or null) Quote or describe textual clues from the summary that indicate company size (e.g., "summary mentions serving large enterprise clients", "described as a startup in the summary").
+*   `company_size_category_inferred`: (string or null) Infer a company size category based on the summary (e.g., "Startup", "SME", "Large Enterprise", "Unknown/Not Specified").
+*   `innovation_level_indicators_text`: (string or null) Quote or describe textual clues from the summary about the company's innovation level or focus (e.g., "summary highlights use of innovative workshops", "AI-supported solutions mentioned in summary").
+*   `website_clarity_notes`: (string or null) Brief notes on how clearly the business model and target group are communicated, based *only* on the provided summary.
+
+You MUST provide a value for every field listed. If you cannot determine a value from the summary, use `null` for optional fields, an empty string `""` for required string fields, or an empty list `[]` for required list fields. Do not omit any fields from the final JSON object.
+
+Remember, the entire response must be ONLY the JSON object.
+The "input_summary_url" field is a placeholder; your LLM response should generate all other fields based on the [Website Summary Text].
+
+--------WEBSITE SUMMARY TEXT------------
+{{WEBSITE_SUMMARY_TEXT_PLACEHOLDER}}
+-----------END OF TEXT-----------------
+

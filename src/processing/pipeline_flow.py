@@ -32,7 +32,6 @@ from src.core.schemas import (
     WebsiteTextSummary, DetailedCompanyAttributes, GoldenPartnerMatchOutput, PartnerMatchOnlyOutput, B2BAnalysisOutput
 )
 from src.data_handling.consolidator import get_canonical_base_url
-from src.llm_clients.gemini_client import GeminiClient
 from src.scraper import scrape_website
 from src.scraper import scraper_logic as full_scraper_logic
 from src.extractors.llm_tasks.summarize_task import generate_website_summary
@@ -209,7 +208,7 @@ PipelineOutput = Tuple[
 def execute_pipeline_flow(
     df: pd.DataFrame,
     app_config: AppConfig,
-    gemini_client: GeminiClient,
+    llm_client: Any,
     run_output_dir: str,
     llm_context_dir: str,
     llm_requests_dir: str,
@@ -239,7 +238,7 @@ def execute_pipeline_flow(
     Args:
         df: Input DataFrame containing company data.
         app_config: Application configuration object.
-        gemini_client: Client for interacting with the Gemini LLM.
+        llm_client: Client for interacting with the configured LLM provider.
         run_output_dir: Directory where scraper outputs (like HTML files) are stored.
         llm_context_dir: Directory where LLM interaction context (prompts, responses)
                          is stored for debugging and analysis.
@@ -620,7 +619,7 @@ def execute_pipeline_flow(
             if pitch_from_description:
                 try:
                     gs_tuple = generate_german_short_summary_from_description(
-                        gemini_client=gemini_client,
+                        gemini_client=llm_client,
                         config=app_config,
                         description_text=str(scraped_text_to_use or ""),
                         llm_context_dir=llm_context_dir,
@@ -674,7 +673,7 @@ def execute_pipeline_flow(
             # --- 3a. Pre-qualification (optional) ---
             if not skip_prequalification:
                 b2b_capacity_tuple = check_b2b_and_capacity(
-                    gemini_client=gemini_client,
+                    gemini_client=llm_client,
                     config=app_config,
                     company_text=scraped_text_to_use, # Use full text for this check
                     llm_context_dir=llm_context_dir,
@@ -751,7 +750,7 @@ def execute_pipeline_flow(
                 logger.info(f"{log_identifier} Using input-provided description context as summary (skipping LLM summarization).")
             else:
                 summary_obj_tuple = generate_website_summary(
-                    gemini_client=gemini_client,
+                    gemini_client=llm_client,
                     config=app_config,
                     original_url=given_url_original_str,
                     scraped_text=scraped_text_to_use,
@@ -797,7 +796,7 @@ def execute_pipeline_flow(
 
             # --- 4. LLM Call 2: Extract Detailed Attributes ---
             attributes_obj_tuple = extract_detailed_attributes(
-                gemini_client=gemini_client,
+                gemini_client=llm_client,
                 config=app_config,
                 summary_obj=website_summary_obj,
                 llm_context_dir=llm_context_dir,
@@ -1022,7 +1021,7 @@ def execute_pipeline_flow(
             else:
                 # --- 5. LLM Call 3: Match Partner ---
                 partner_match_tuple = match_partner(
-                    gemini_client=gemini_client,
+                    gemini_client=llm_client,
                     config=app_config,
                     target_attributes=detailed_attributes_obj,
                     golden_partner_summaries=golden_partner_summaries,
@@ -1089,7 +1088,7 @@ def execute_pipeline_flow(
                         all_golden_partner_match_outputs.append(final_match_output)
                     else:
                         sales_pitch_tuple = generate_sales_pitch(
-                            gemini_client=gemini_client,
+                            gemini_client=llm_client,
                             config=app_config,
                             target_attributes=detailed_attributes_obj,
                             matched_partner=matched_partner_data,

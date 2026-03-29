@@ -8,6 +8,7 @@ This repo contains **two related pipelines**:
 Additional docs live in:
 - `docs/SYSTEM_OVERVIEW.md`
 - `docs/OUTPUT_FILES.md`
+- `docs/PHONE_ONLY_OPENAI_WORKFLOW.md`
 - `docs/PHONE_NUMBER_FIELDS.md`
 - `docs/PERSON_ASSOCIATED_NUMBERS.md` (proposal)
 - `docs/GOLDEN_PARTNER_MATCHING_IMPROVEMENTS.md` (proposal)
@@ -27,12 +28,32 @@ python -m playwright install
 
 #### Configure
 - Create `.env` in the repo root (see `env.example` in this repo — copy it to `.env`).
-- **Minimum required** to run any LLM-dependent pipeline:
-  - `GEMINI_API_KEY=...`
+- **Current phone-only setup (recommended)**:
+  - `PHONE_LLM_PROVIDER="openai"`
+  - `OPENAI_API_KEY=...`
+  - `OPENAI_MODEL_NAME="gpt-5.4-mini-2026-03-17"`
+  - `OPENAI_SERVICE_TIER="flex"`
+- `GEMINI_API_KEY` is still relevant for the older Gemini path and for other Gemini-backed flows, but the current bulk phone-only workflow described below uses OpenAI.
 
 ---
 
 ### 2) How to run: phone-only (recommended for bulk phone enrichment)
+
+#### Current recommended workflow: multi-sheet workbook -> phone-only -> write-back workbook
+
+This is the main workflow currently in use for bulk phone extraction runs.
+
+It does the following:
+- reads every sheet from the source workbook
+- combines them into one prepared CSV with provenance columns
+- runs `phone_extract.py` in parallel
+- writes a new workbook with the phone output columns merged back into the original sheets
+
+```bash
+python scripts/run_phone_extract_workbook.py --input-xlsx "data\Assemblean Manuav DACH Data enrichment.xlsx" --run-phone-extract --workers 50 --suffix assemblean_dach_openai54mini_phone50_fresh --write-back-workbook
+```
+
+This workbook-wrapper path is now the preferred way to run large phone-only jobs because it keeps sheet provenance intact and avoids manual merge-back steps later.
 
 #### Common commands
 - **Single-process (simplest)**:
@@ -51,6 +72,12 @@ python phone_extract.py -i "data\Apollo Shopware Partner Germany 1(Sheet1).csv" 
 
 ```bash
 python phone_extract.py -i "data\Apollo Shopware Partner Germany 1(Sheet1).csv" -r 1-190 -s full25 --workers 25
+```
+
+- **Workbook wrapper (recommended for multi-sheet Excel inputs)**:
+
+```bash
+python scripts/run_phone_extract_workbook.py --input-xlsx "data\Assemblean Manuav DACH Data enrichment.xlsx" --run-phone-extract --workers 50 --suffix assemblean_dach_openai54mini_phone50_fresh --write-back-workbook
 ```
 
 #### Output layout (phone-only)
@@ -72,6 +99,14 @@ Phone-only runs always write into **one master run folder**:
   - `workers/wXofN/failed_rows_wXofN.csv`
   - `workers/wXofN/run_metrics_wXofN.md`
   - `workers/wXofN/scraped_content/...` (scraped cleaned-text artifacts)
+
+When the workbook wrapper is used, you also get:
+- `data/prepared/<workbook_stem>__all_sheets.csv`
+- `data/prepared/<workbook_stem>__phone_augmented.xlsx` unless `--output-xlsx` overrides the destination
+- provenance columns in the combined CSV and augmented outputs:
+  - `SourceWorkbook`
+  - `SourceSheet`
+  - `SourceSheetRowNumber`
 
 #### What columns you get
 The phone-only result CSV includes many internal columns; the **augmented CSV** is intended for end-users and includes:

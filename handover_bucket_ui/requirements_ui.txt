@@ -1,0 +1,7 @@
+# Extra dependencies for the UI demo backend (FastAPI).
+#
+# The core pipeline dependencies live in the main repo's requirements.txt.
+# If you want to run the demo API in handover_bucket_ui/code/fastapi_example_app.py:
+fastapi
+uvicorn
+

@@ -438,6 +438,18 @@ class AppConfig:
         self.gemini_api_key: Optional[str] = os.getenv('GEMINI_API_KEY')
         self.llm_model_name: str = os.getenv('LLM_MODEL_NAME', 'gemini-1.5-pro-latest')  # Default to a capable model
         self.llm_model_name_sales_insights: str = os.getenv('LLM_MODEL_NAME_SALES_INSIGHTS', 'gemini-1.5-pro-preview-06-05')
+        self.full_llm_provider: str = os.getenv('FULL_LLM_PROVIDER', 'gemini').strip().lower()
+        self.phone_llm_provider: str = os.getenv('PHONE_LLM_PROVIDER', 'gemini').strip().lower()
+        self.openai_api_key: Optional[str] = os.getenv('OPENAI_API_KEY')
+        self.openai_model_name: str = os.getenv('OPENAI_MODEL_NAME', 'gpt-5.1-2025-11-13')
+        self.openai_model_name_sales_insights: str = os.getenv('OPENAI_MODEL_NAME_SALES_INSIGHTS', self.openai_model_name)
+        self.openai_service_tier: str = os.getenv('OPENAI_SERVICE_TIER', 'flex')
+        self.openai_timeout_seconds: int = int(os.getenv('OPENAI_TIMEOUT_SECONDS', '900'))
+        self.openai_flex_max_retries: int = int(os.getenv('OPENAI_FLEX_MAX_RETRIES', '5'))
+        self.openai_flex_fallback_to_auto: bool = os.getenv('OPENAI_FLEX_FALLBACK_TO_AUTO', 'True').lower() == 'true'
+        self.openai_prompt_cache: bool = os.getenv('OPENAI_PROMPT_CACHE', 'True').lower() == 'true'
+        self.openai_prompt_cache_retention: str = os.getenv('OPENAI_PROMPT_CACHE_RETENTION', '24h')
+        self.openai_reasoning_effort: Optional[str] = (os.getenv('OPENAI_REASONING_EFFORT', '') or '').strip() or None
         self.llm_temperature_default: float = float(os.getenv('LLM_TEMPERATURE_DEFAULT', '0.3'))
         self.llm_temperature: float = float(os.getenv('LLM_TEMPERATURE', self.llm_temperature_default))
         self.llm_temperature_extraction: float = float(os.getenv('LLM_TEMPERATURE_EXTRACTION', '0.2'))
@@ -565,6 +577,13 @@ class AppConfig:
         self.enable_phone_llm_rerank: bool = os.getenv("ENABLE_PHONE_LLM_RERANK", "True").lower() == "true"
         self.phone_llm_rerank_max_candidates: int = int(os.getenv("PHONE_LLM_RERANK_MAX_CANDIDATES", "25") or 25)
 
+        # --- Provider Backpressure / Concurrency Controls ---
+        self.provider_max_inflight_default: int = int(os.getenv("PROVIDER_MAX_INFLIGHT_DEFAULT", "6") or 6)
+        self.provider_max_inflight_openai: int = int(os.getenv("PROVIDER_MAX_INFLIGHT_OPENAI", str(self.provider_max_inflight_default)) or self.provider_max_inflight_default)
+        self.provider_max_inflight_gemini: int = int(os.getenv("PROVIDER_MAX_INFLIGHT_GEMINI", str(self.provider_max_inflight_default)) or self.provider_max_inflight_default)
+        self.provider_backpressure_cooldown_seconds: int = int(os.getenv("PROVIDER_BACKPRESSURE_COOLDOWN_SECONDS", "30") or 30)
+        self.provider_backpressure_error_burst_threshold: int = int(os.getenv("PROVIDER_BACKPRESSURE_ERROR_BURST_THRESHOLD", "3") or 3)
+
         # --- Data Handling & Input Profiling ---
         self.input_excel_file_path: str = input_file_override or os.getenv('INPUT_EXCEL_FILE_PATH', 'data_to_be_inputed.xlsx')  # Relative to project root
         self.input_file_profile_name: str = os.getenv("INPUT_FILE_PROFILE_NAME", "default")
@@ -651,3 +670,52 @@ class AppConfig:
 
         page_type_legal_str: str = os.getenv('PAGE_TYPE_KEYWORDS_LEGAL', 'privacy,datenschutz,terms,agb,legal')
         self.page_type_keywords_legal: List[str] = [kw.strip().lower() for kw in page_type_legal_str.split(',') if kw.strip()]
+
+        self._validate_runtime_config()
+
+    def _require_positive_int(self, name: str, value: int) -> None:
+        if int(value) <= 0:
+            raise ValueError(f"{name} must be a positive integer. Got: {value}")
+
+    def _validate_runtime_config(self) -> None:
+        valid_providers = {"gemini", "openai"}
+        if self.full_llm_provider not in valid_providers:
+            raise ValueError(f"FULL_LLM_PROVIDER must be one of {sorted(valid_providers)}. Got: {self.full_llm_provider}")
+        if self.phone_llm_provider not in valid_providers:
+            raise ValueError(f"PHONE_LLM_PROVIDER must be one of {sorted(valid_providers)}. Got: {self.phone_llm_provider}")
+
+        if self.full_llm_provider == "openai" and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when FULL_LLM_PROVIDER=openai.")
+        if self.phone_llm_provider == "openai" and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when PHONE_LLM_PROVIDER=openai.")
+        if self.full_llm_provider == "gemini" and not self.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is required when FULL_LLM_PROVIDER=gemini.")
+        if self.phone_llm_provider == "gemini" and not self.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is required when PHONE_LLM_PROVIDER=gemini.")
+
+        valid_service_tiers = {"auto", "default", "flex", "priority"}
+        normalized_service_tier = (self.openai_service_tier or "").strip().lower()
+        if normalized_service_tier and normalized_service_tier not in valid_service_tiers:
+            raise ValueError(
+                f"OPENAI_SERVICE_TIER must be one of {sorted(valid_service_tiers)} when set. "
+                f"Got: {self.openai_service_tier}"
+            )
+        self.openai_service_tier = normalized_service_tier or "flex"
+
+        for name, value in (
+            ("OPENAI_TIMEOUT_SECONDS", self.openai_timeout_seconds),
+            ("OPENAI_FLEX_MAX_RETRIES", self.openai_flex_max_retries),
+            ("LLM_MAX_TOKENS", self.llm_max_tokens),
+            ("LLM_CHUNK_PROCESSOR_MAX_TOKENS", self.llm_chunk_processor_max_tokens),
+            ("LLM_MAX_CHUNKS_PER_URL", self.llm_max_chunks_per_url),
+            ("LLM_MAX_RETRIES_ON_NUMBER_MISMATCH", self.llm_max_retries_on_number_mismatch),
+            ("LLM_CANDIDATE_CHUNK_SIZE", self.llm_candidate_chunk_size),
+            ("PHONE_LLM_MAX_CANDIDATES_TOTAL", self.phone_llm_max_candidates_total),
+            ("PHONE_LLM_RERANK_MAX_CANDIDATES", self.phone_llm_rerank_max_candidates),
+            ("PROVIDER_MAX_INFLIGHT_DEFAULT", self.provider_max_inflight_default),
+            ("PROVIDER_MAX_INFLIGHT_OPENAI", self.provider_max_inflight_openai),
+            ("PROVIDER_MAX_INFLIGHT_GEMINI", self.provider_max_inflight_gemini),
+            ("PROVIDER_BACKPRESSURE_COOLDOWN_SECONDS", self.provider_backpressure_cooldown_seconds),
+            ("PROVIDER_BACKPRESSURE_ERROR_BURST_THRESHOLD", self.provider_backpressure_error_burst_threshold),
+        ):
+            self._require_positive_int(name, value)

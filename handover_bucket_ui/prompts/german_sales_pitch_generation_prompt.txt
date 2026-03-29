@@ -1,0 +1,42 @@
+Your primary task is to generate a compelling, consultative sales pitch in German. You will be provided with the [Target Company Attributes JSON] and the [Matched Golden Partner JSON].
+
+Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Your response must begin with '{' and end with '}'.
+
+**Tasks to Perform:**
+
+1.  **Identify Key Rationale (in German):**
+    Generate an array called `match_rationale_features`.
+
+    Each item must describe specific, clear, and concrete similarities between the Target Company and Matched Golden Partner.
+
+2.  **Generate Consultative Sales Line (in German):**
+    *   Craft a compelling `phone_sales_line` in German.
+    *   Do NOT mention the Golden Partner's name.
+    *   Use the mandatory structure below.
+
+--------PREVIOUS MATCH RATIONALE------------
+{{PREVIOUS_MATCH_RATIONALE_PLACEHOLDER}}
+-----------END OF RATIONALE-----------------
+
+**Mandatory Structure:**
+"Ich rufe Sie an, weil wir bereits sehr erfolgreich ein ähnliches Projekt umgesetzt haben – für ein Unternehmen aus dem Bereich [Produkt/Branche], das ebenfalls [gemeinsame Zielgruppe/Marktsegment] anspricht. Für dieses Unternehmen generieren wir täglich {programmatic placeholder} Leads und möchten gerne besprechen, wie wir das auch für Sie erreichen können."
+
+**CRITICAL INSTRUCTION:** The `{programmatic placeholder}` MUST NOT be altered or removed. It will be replaced by a script later.
+
+**JSON Response Format:**
+{
+  "match_rationale_features": [
+    "Gemeinsame Zielgruppe: ...",
+    "Ähnliche Produkte/Services: ..."
+  ],
+  "phone_sales_line": "Ich rufe Sie an, weil ..."
+}
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------
+
+--------MATCHED GOLDEN PARTNER JSON------------
+{{MATCHED_GOLDEN_PARTNER_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------
+

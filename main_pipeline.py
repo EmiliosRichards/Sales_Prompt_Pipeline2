@@ -6,12 +6,15 @@ import os
 import time
 import argparse # Import argparse
 import sys
+import atexit
 from dotenv import load_dotenv
 # from pathlib import Path # No longer used directly for augmented report path here
 
 from src.data_handling.loader import load_and_preprocess_data
 # from src.data_handling.consolidator import get_canonical_base_url, generate_processed_contacts_report # Moved to report orchestrator
+from src.llm_clients.backpressure import effective_worker_count
 from src.llm_clients.gemini_client import GeminiClient
+from src.llm_clients.openai_client import OpenAIClient
 from src.core.schemas import GoldenPartnerMatchOutput # For the new pipeline result
 from src.core.logging_config import setup_logging
 from src.core.config import AppConfig
@@ -30,6 +33,7 @@ from src.reporting.metrics_manager import write_run_metrics
 from src.processing.pipeline_flow import execute_pipeline_flow
 from src.processing.parallel_full_pipeline import run_parallel_full_pipeline
 from src.reporting.main_report_orchestrator import generate_all_reports # NEW
+from src.reporting.run_manifest import start_run_manifest, finalize_run_manifest, ManifestHandle
 
 # Load .env but do NOT override environment variables already set by the shell.
 # This makes it easy to override prompt paths / flags per-run without editing .env.
@@ -96,13 +100,36 @@ def main(args) -> None:
     Orchestrates the entire process from data loading to report generation.
     """
     run_command = " ".join(sys.argv)
+    manifest_handle: Optional[ManifestHandle] = None
+    manifest_finalized: bool = False
+    pipeline_failed: bool = False
+
+    def _finalize_manifest(status: str, metrics: Optional[Dict[str, Any]] = None) -> None:
+        nonlocal manifest_finalized
+        if manifest_finalized:
+            return
+        manifest_finalized = True
+        try:
+            if manifest_handle:
+                finalize_run_manifest(
+                    handle=manifest_handle,
+                    status=status,
+                    run_metrics=metrics,
+                    errors=(metrics or run_metrics).get("errors_encountered") if isinstance((metrics or run_metrics), dict) else None,
+                )
+        except Exception:
+            pass
     # Initialize AppConfig with overrides from command-line arguments
-    app_config: AppConfig = AppConfig(
-        input_file_override=args.input_file,
-        row_range_override=args.range,
-        run_id_suffix_override=args.suffix,
-        test_mode=args.test
-    )
+    try:
+        app_config: AppConfig = AppConfig(
+            input_file_override=args.input_file,
+            row_range_override=args.range,
+            run_id_suffix_override=args.suffix,
+            test_mode=args.test
+        )
+    except ValueError as config_error:
+        print(f"Configuration error: {config_error}")
+        return
     # Allow overriding the input profile at runtime
     if getattr(args, 'input_profile', None):
         app_config.input_file_profile_name = args.input_profile
@@ -165,6 +192,27 @@ def main(args) -> None:
     input_file_path_abs = resolve_path(app_config.input_excel_file_path, BASE_FILE_PATH_FOR_RESOLVE) # Use helper
     logger.info(f"Resolved input file path: {input_file_path_abs}")
 
+    # --- Run manifest start (best-effort audit trail) ---
+    try:
+        manifest_handle = start_run_manifest(
+            run_output_dir=run_output_dir,
+            run_id=run_id,
+            pipeline_name="main_pipeline",
+            argv=list(sys.argv),
+            run_command=run_command,
+            args_obj=args,
+            app_config=app_config,
+            input_file_abs=input_file_path_abs,
+            extra={
+                "mode": getattr(app_config, "input_file_profile_name", None),
+            },
+        )
+    except Exception:
+        manifest_handle = None
+    # If the process exits due to an unhandled exception, attempt to mark the run as failed.
+    # This is best-effort only (won't run on hard-kills).
+    atexit.register(lambda: _finalize_manifest("failed", run_metrics))
+
     failure_log_csv_path = os.path.join(run_output_dir, f"failed_rows_{run_id}.csv")
     logger.info(f"Row-specific failure log for this run will be: {failure_log_csv_path}")
 
@@ -175,30 +223,38 @@ def main(args) -> None:
         run_metrics["errors_encountered"].append(f"Input file not found: {input_file_path_abs}")
         run_metrics["total_duration_seconds"] = time.time() - pipeline_start_time
         write_run_metrics(metrics=run_metrics, output_dir=run_output_dir if 'run_output_dir' in locals() else ".", run_id=run_id, pipeline_start_time=pipeline_start_time, attrition_data_list_for_metrics=[], canonical_domain_journey_data={})
+        _finalize_manifest("failed", run_metrics)
         return
 
-    # 4. Initialize LLM Extractor
-    gemini_client: Optional[GeminiClient] = None # Initialize as Optional
+    # 4. Initialize LLM client for the full sales pipeline
+    llm_client: Optional[Any] = None
+    full_llm_provider = (getattr(app_config, "full_llm_provider", "gemini") or "gemini").strip().lower()
     try:
-        gemini_client = GeminiClient(config=app_config)
-        logger.info("GeminiClient initialized successfully.")
+        if full_llm_provider == "openai":
+            llm_client = OpenAIClient(config=app_config)
+            logger.info("OpenAIClient initialized successfully for the full pipeline.")
+        else:
+            llm_client = GeminiClient(config=app_config)
+            logger.info("GeminiClient initialized successfully for the full pipeline.")
     except ValueError as ve:
-        logger.error(f"Failed to initialize GeminiClient: {ve}. Check GEMINI_API_KEY. Pipeline cannot proceed with LLM steps.")
+        logger.error(f"Failed to initialize {full_llm_provider} LLM client: {ve}. Pipeline cannot proceed with LLM steps.")
         run_metrics["errors_encountered"].append(f"LLM Extractor init failed: {ve}")
         # Decide if pipeline should stop or continue without LLM
         # For now, let's assume it stops if LLM is critical.
         run_metrics["total_duration_seconds"] = time.time() - pipeline_start_time
         write_run_metrics(metrics=run_metrics, output_dir=run_output_dir, run_id=run_id, pipeline_start_time=pipeline_start_time, attrition_data_list_for_metrics=[], canonical_domain_journey_data={})
+        _finalize_manifest("failed", run_metrics)
         return
     except Exception as e:
-        logger.error(f"Unexpected error initializing GeminiClient: {e}", exc_info=True)
+        logger.error(f"Unexpected error initializing {full_llm_provider} LLM client: {e}", exc_info=True)
         run_metrics["errors_encountered"].append(f"LLM Extractor init unexpected error: {e}")
         run_metrics["total_duration_seconds"] = time.time() - pipeline_start_time
         write_run_metrics(metrics=run_metrics, output_dir=run_output_dir, run_id=run_id, pipeline_start_time=pipeline_start_time, attrition_data_list_for_metrics=[], canonical_domain_journey_data={})
+        _finalize_manifest("failed", run_metrics)
         return
     
-    if gemini_client is None: # Safeguard, should be caught by returns above
-        logger.error("GeminiClient is None after initialization attempt. Exiting.")
+    if llm_client is None: # Safeguard, should be caught by returns above
+        logger.error("LLM client is None after initialization attempt. Exiting.")
         return
 
     # Load and Summarize Golden Partner Data
@@ -294,22 +350,37 @@ def main(args) -> None:
         if getattr(args, "workers", 1) and int(getattr(args, "workers", 1)) > 1:
             # Parallel end-to-end mode: workers run the full pipeline for row slices.
             # The master process writes a live CSV + JSONL as rows arrive.
-            run_parallel_full_pipeline(
-                input_file_path_abs=input_file_path_abs,
-                input_profile=app_config.input_file_profile_name,
-                app_config=app_config,
-                run_id=run_id,
-                run_output_dir=run_output_dir,
-                llm_context_dir=llm_context_dir,
-                llm_requests_dir=llm_requests_dir,
-                golden_partner_summaries=golden_partner_summaries,
-                workers=int(getattr(args, "workers", 1)),
-                row_range=getattr(args, "range", "") or "",
-                skip_prequalification=getattr(args, "skip_prequalification", False),
-                pitch_from_description=getattr(args, "pitch_from_description", False),
-            )
-            # In parallel mode, the orchestrator produces the SalesOutreachReport_* files directly.
-            return
+            try:
+                requested_workers = int(getattr(args, "workers", 1))
+                effective_workers = effective_worker_count(app_config, full_llm_provider, requested_workers)
+                if effective_workers != requested_workers:
+                    logger.warning(
+                        "Clamping full-pipeline workers from %s to %s for provider '%s' backpressure.",
+                        requested_workers,
+                        effective_workers,
+                        full_llm_provider,
+                    )
+                run_parallel_full_pipeline(
+                    input_file_path_abs=input_file_path_abs,
+                    input_profile=app_config.input_file_profile_name,
+                    app_config=app_config,
+                    run_id=run_id,
+                    run_output_dir=run_output_dir,
+                    llm_context_dir=llm_context_dir,
+                    llm_requests_dir=llm_requests_dir,
+                    golden_partner_summaries=golden_partner_summaries,
+                    workers=effective_workers,
+                    row_range=getattr(args, "range", "") or "",
+                    skip_prequalification=getattr(args, "skip_prequalification", False),
+                    pitch_from_description=getattr(args, "pitch_from_description", False),
+                )
+                # In parallel mode, the orchestrator produces the SalesOutreachReport_* files directly.
+                _finalize_manifest("completed", None)
+                return
+            except Exception as e_par:
+                run_metrics["errors_encountered"].append(f"Parallel pipeline failed: {type(e_par).__name__}: {e_par}")
+                _finalize_manifest("failed", run_metrics)
+                raise
 
         (df, all_match_outputs, attrition_data_list, canonical_domain_journey_data,
          true_base_scraper_status, true_base_to_pathful_map, input_to_canonical_map,
@@ -317,7 +388,7 @@ def main(args) -> None:
         ) = execute_pipeline_flow(
             df=df,
             app_config=app_config,
-            gemini_client=gemini_client,
+            llm_client=llm_client,
             run_output_dir=run_output_dir,
             llm_context_dir=llm_context_dir,
             llm_requests_dir=llm_requests_dir,
@@ -388,6 +459,7 @@ def main(args) -> None:
     except Exception as pipeline_exec_error:
         logger.error(f"An unhandled error occurred during pipeline execution or reporting: {pipeline_exec_error}", exc_info=True)
         run_metrics["errors_encountered"].append(f"Pipeline execution/reporting error: {str(pipeline_exec_error)}")
+        pipeline_failed = True
     finally:
         if failure_log_file_handle:
             try:
@@ -408,6 +480,13 @@ def main(args) -> None:
     logger.info(f"Pipeline run {run_id} finished. Total duration: {run_metrics['total_duration_seconds']:.2f}s.")
     logger.info(f"Run metrics file: {os.path.join(run_output_dir, f'run_metrics_{run_id}.md')}")
     logger.info(f"All outputs for this run are in: {run_output_dir}")
+
+    # --- Run manifest finalize (best-effort) ---
+    try:
+        if manifest_handle:
+            _finalize_manifest(("failed" if pipeline_failed else "completed"), run_metrics)
+    except Exception:
+        pass
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run the sales outreach pipeline with optional configuration overrides.")

@@ -32,6 +32,8 @@ FAULT_CATEGORY_MAP_DEFINITION: Dict[str, str] = {
     "LLM_Output_NoNumbersFound_AllAttempts": "LLM Issue",
     "LLM_Output_NumbersFound_NoneRelevant_AllAttempts": "LLM Issue",
     "LLM_Processing_Error_AllAttempts": "LLM Issue",
+    "LLM_Reranker_NoOperationalCallList": "LLM Issue",
+    "OperationalCallList_NotExported": "Pipeline Logic/Configuration",
     "DataConsolidation_Error_ForRow": "Pipeline Error",
     "Pipeline_Skipped_MaxRedirects_ForInputURL": "Website Issue",
     "Pipeline_Skipped_PreviouslyFailedInput": "Pipeline Logic/Configuration",  # For future use when re-processing failed inputs

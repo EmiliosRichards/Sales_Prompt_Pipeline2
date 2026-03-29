@@ -36,6 +36,14 @@ Final copies:
 - `phone_extraction_results_<run_id>.csv` / `.jsonl`
 - `input_augmented_<run_id>.csv` / `.jsonl`
 
+Current recommended bulk run path:
+- use `scripts/run_phone_extract_workbook.py` for multi-sheet Excel inputs
+- this wrapper prepares a combined CSV, launches `phone_extract.py`, and writes a new workbook with results merged back into each original sheet
+
+Additional workbook-wrapper outputs:
+- `data/prepared/<workbook_stem>__all_sheets.csv`
+- `data/prepared/<workbook_stem>__phone_augmented.xlsx` unless `--output-xlsx` is supplied
+
 #### Workers
 When `--workers > 1`:
 - `workers/wXofN/phone_extraction_results_wXofN.csv` (+ `.jsonl`)

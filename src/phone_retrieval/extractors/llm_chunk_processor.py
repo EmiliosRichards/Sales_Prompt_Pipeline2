@@ -3,16 +3,14 @@ import json
 from collections import defaultdict
 from typing import List, Dict, Any, Tuple, Optional
 
-import google.generativeai.types as genai_types # Standardized to google.generativeai
-# Assuming google.genai.types is the correct path for GenerationConfig based on llm_extractor
-# If it's google.generativeai.types, it will be adjusted. The user provided google.genai.types
+from google.genai import types as genai_types
 
 from src.core.config import AppConfig
 from src.core.schemas import PhoneNumberLLMOutput, MinimalExtractionOutput, HomepageContextOutput
-from src.phone_retrieval.llm_clients.gemini_client import GeminiClient
 from src.phone_retrieval.utils.llm_processing_helpers import (
     load_prompt_template,
     extract_json_from_text,
+    normalize_phone_number,
     process_successful_llm_item,
     create_error_llm_item,
     save_llm_artifact
@@ -46,7 +44,8 @@ class LLMChunkProcessor:
     def __init__(
         self,
         config: AppConfig,
-        gemini_client: GeminiClient,
+        llm_client: Any,
+        llm_provider: str,
         prompt_template_path: str,
     ):
         """
@@ -54,11 +53,13 @@ class LLMChunkProcessor:
 
         Args:
             config: The application configuration.
-            gemini_client: The client for interacting with the Gemini LLM.
+            llm_client: The client for interacting with the configured LLM provider.
+            llm_provider: The active provider name (e.g. gemini, openai).
             prompt_template_path: Path to the base prompt template.
         """
         self.config = config
-        self.gemini_client = gemini_client
+        self.llm_client = llm_client
+        self.llm_provider = (llm_provider or "gemini").strip().lower()
         self.prompt_template_path = prompt_template_path
         try:
             self.base_prompt_template = load_prompt_template(self.prompt_template_path)
@@ -66,6 +67,56 @@ class LLMChunkProcessor:
         except Exception as e:
             logger.error(f"Failed to load base prompt template from {self.prompt_template_path}: {e}")
             raise
+
+    def _call_llm_for_chunk(
+        self,
+        *,
+        prompt_text: str,
+        file_identifier_prefix: str,
+        triggering_input_row_id: Any,
+        triggering_company_name: str,
+    ) -> Tuple[Optional[str], Optional[MinimalExtractionOutput], Dict[str, int]]:
+        if self.llm_provider == "openai":
+            result = self.llm_client.generate_structured_output_with_retry(
+                user_prompt=prompt_text,
+                response_model=MinimalExtractionOutput,
+                schema_name="phone_number_extraction",
+                file_identifier_prefix=file_identifier_prefix,
+                triggering_input_row_id=triggering_input_row_id,
+                triggering_company_name=triggering_company_name,
+                system_prompt=(
+                    "You classify phone number candidates for a company's website. "
+                    "Return only valid JSON matching the schema."
+                ),
+            )
+            return result.raw_text, result.parsed_output, result.usage
+
+        generation_config = genai_types.GenerateContentConfig(
+            max_output_tokens=self.config.llm_chunk_processor_max_tokens,
+            temperature=self.config.llm_temperature,
+            response_mime_type="application/json",
+        )
+        llm_response_obj = self.llm_client.generate_content_with_retry(
+            contents=prompt_text,
+            generation_config=generation_config,
+            file_identifier_prefix=file_identifier_prefix,
+            triggering_input_row_id=triggering_input_row_id,
+            triggering_company_name=triggering_company_name,
+            system_instruction=(
+                "Return only valid JSON that matches the provided schema exactly. "
+                "Do not wrap the JSON in markdown fences. "
+                "Do not add commentary before or after the JSON."
+            ),
+        )
+        raw_llm_response_text_chunk = getattr(llm_response_obj, 'text', None) if llm_response_obj else None
+        token_stats = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        if llm_response_obj and hasattr(llm_response_obj, 'usage_metadata') and llm_response_obj.usage_metadata:
+            token_stats = {
+                "prompt_tokens": llm_response_obj.usage_metadata.prompt_token_count or 0,
+                "completion_tokens": llm_response_obj.usage_metadata.candidates_token_count or 0,
+                "total_tokens": llm_response_obj.usage_metadata.total_token_count or 0,
+            }
+        return raw_llm_response_text_chunk, None, token_stats
 
     def _prepare_prompt_for_chunk(
         self,
@@ -106,9 +157,30 @@ class LLMChunkProcessor:
         logger.debug(f"Formatted prompt for chunk: {formatted_prompt_chunk}")
         return formatted_prompt_chunk
 
+    def _numbers_match(self, llm_number: Optional[str], input_item_detail: Dict[str, Any]) -> bool:
+        llm_val = (llm_number or "").strip()
+        input_val = str(input_item_detail.get("number") or input_item_detail.get("candidate_number") or "").strip()
+        if not llm_val or not input_val:
+            return False
+        if llm_val == input_val:
+            return True
+
+        llm_norm = normalize_phone_number(
+            llm_val,
+            country_codes=self.config.target_country_codes,
+            default_region_code=self.config.default_region_code,
+        )
+        input_norm = normalize_phone_number(
+            input_val,
+            country_codes=self.config.target_country_codes,
+            default_region_code=self.config.default_region_code,
+        )
+        return bool(llm_norm and input_norm and llm_norm == input_norm)
+
     def _process_llm_response_for_chunk(
         self,
         llm_response_text: Optional[str],
+        parsed_llm_result: Optional[MinimalExtractionOutput],
         current_chunk_candidate_items: List[Dict[str, str]],
         final_processed_outputs_for_chunk: List[Optional[PhoneNumberLLMOutput]],
         items_needing_retry_for_chunk: List[Tuple[int, Dict[str, Any]]],
@@ -120,7 +192,7 @@ class LLMChunkProcessor:
         """
         Processes the LLM response for a single chunk, populating output lists.
         """
-        if not llm_response_text:
+        if not llm_response_text and parsed_llm_result is None:
             logger.warning(f"[{chunk_file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] LLM response text is empty for chunk.")
             for k_err, item_detail_chunk_err in enumerate(current_chunk_candidate_items):
                 if final_processed_outputs_for_chunk[k_err] is None: # Only fill if not already processed (e.g. by retry)
@@ -129,30 +201,36 @@ class LLMChunkProcessor:
 
         logger.debug(f"Raw LLM response for chunk: {llm_response_text}")
 
-        # The new SDK might provide parsed Pydantic objects directly if response_schema is used effectively.
-        # For now, assuming we might still need to parse from text as a fallback or primary method.
-        # This part needs to align with how gemini_client.generate_content_with_retry actually returns data.
-        # If it returns a Pydantic object directly, this parsing logic changes.
-        # The prompt implies `MinimalExtractionOutput` is the response_schema.
-
-        # Attempt to parse with Pydantic if direct object is not available
-        # This assumes gemini_client might return a structure that includes the parsed object or raw text
-        # For now, let's assume we get raw text and need to parse it.
-
-        json_candidate_str_chunk = extract_json_from_text(llm_response_text)
-        if not json_candidate_str_chunk:
-            logger.warning(f"[{chunk_file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] Could not extract JSON block from LLM response for chunk.")
-            for k_err, item_detail_chunk_err in enumerate(current_chunk_candidate_items):
-                if final_processed_outputs_for_chunk[k_err] is None:
-                    final_processed_outputs_for_chunk[k_err] = create_error_llm_item(item_detail_chunk_err, "Error_ChunkNoJsonBlock", file_identifier_prefix=chunk_file_identifier_prefix, triggering_input_row_id=triggering_input_row_id, triggering_company_name=triggering_company_name)
-            return
-
         try:
-            # Gemini client with response_schema should ideally return a parsed object or allow easy parsing
-            # For now, we parse the extracted JSON string.
-            parsed_json_object_chunk = json.loads(json_candidate_str_chunk)
-            logger.debug(f"Parsed JSON object for chunk: {parsed_json_object_chunk}")
-            llm_result_chunk = MinimalExtractionOutput(**parsed_json_object_chunk)
+            if parsed_llm_result is not None:
+                llm_result_chunk = parsed_llm_result
+            else:
+                parsed_json_object_chunk = None
+                json_candidate_str_chunk = None
+                if llm_response_text:
+                    try:
+                        parsed_json_object_chunk = json.loads(llm_response_text)
+                        json_candidate_str_chunk = llm_response_text
+                    except json.JSONDecodeError:
+                        json_candidate_str_chunk = extract_json_from_text(llm_response_text)
+                        if json_candidate_str_chunk:
+                            parsed_json_object_chunk = json.loads(json_candidate_str_chunk)
+
+                if parsed_json_object_chunk is None:
+                    logger.warning(f"[{chunk_file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] Could not extract JSON block from LLM response for chunk.")
+                    for k_err, item_detail_chunk_err in enumerate(current_chunk_candidate_items):
+                        if final_processed_outputs_for_chunk[k_err] is None:
+                            final_processed_outputs_for_chunk[k_err] = create_error_llm_item(item_detail_chunk_err, "Error_ChunkNoJsonBlock", file_identifier_prefix=chunk_file_identifier_prefix, triggering_input_row_id=triggering_input_row_id, triggering_company_name=triggering_company_name)
+                    return
+
+                if (
+                    isinstance(parsed_json_object_chunk, dict)
+                    and "extracted_numbers" not in parsed_json_object_chunk
+                    and {"number", "type", "classification", "is_valid", "source_url"}.issubset(parsed_json_object_chunk.keys())
+                ):
+                    parsed_json_object_chunk = {"extracted_numbers": [parsed_json_object_chunk]}
+                logger.debug(f"Parsed JSON object for chunk: {parsed_json_object_chunk}")
+                llm_result_chunk = MinimalExtractionOutput(**parsed_json_object_chunk)
             validated_numbers_chunk = llm_result_chunk.extracted_numbers
 
             if len(validated_numbers_chunk) != len(current_chunk_candidate_items):
@@ -206,19 +284,37 @@ class LLMChunkProcessor:
                 num_to_input_indices: Dict[str, List[int]] = defaultdict(list)
                 for idx, inp in enumerate(current_chunk_candidate_items):
                     in_num = str(inp.get("candidate_number") or inp.get("number") or "").strip()
+                    in_num_norm = normalize_phone_number(
+                        in_num,
+                        country_codes=self.config.target_country_codes,
+                        default_region_code=self.config.default_region_code,
+                    ) if in_num else None
                     in_url = str(inp.get("source_url") or "").strip().lower()
                     key_to_input_indices[(in_num, in_url)].append(idx)
+                    if in_num_norm:
+                        key_to_input_indices[(in_num_norm, in_url)].append(idx)
                     if in_num:
                         num_to_input_indices[in_num].append(idx)
+                    if in_num_norm:
+                        num_to_input_indices[in_num_norm].append(idx)
 
                 idx_to_outputs: Dict[int, List[PhoneNumberLLMOutput]] = defaultdict(list)
                 for out in validated_numbers_chunk:
                     out_num = str(getattr(out, "number", "") or "").strip()
+                    out_num_norm = normalize_phone_number(
+                        out_num,
+                        country_codes=self.config.target_country_codes,
+                        default_region_code=self.config.default_region_code,
+                    ) if out_num else None
                     out_url = str(getattr(out, "source_url", "") or "").strip().lower()
                     match_indices = key_to_input_indices.get((out_num, out_url))
+                    if not match_indices and out_num_norm:
+                        match_indices = key_to_input_indices.get((out_num_norm, out_url))
                     if not match_indices:
                         # Fallback: match on number only (less safe)
                         match_indices = num_to_input_indices.get(out_num)
+                    if not match_indices and out_num_norm:
+                        match_indices = num_to_input_indices.get(out_num_norm)
                     if not match_indices:
                         continue
                     idx_to_outputs[match_indices[0]].append(out)
@@ -264,8 +360,7 @@ class LLMChunkProcessor:
                         continue
                     llm_output_item_chunk = validated_numbers_chunk[k]
                     # Compare based on 'number' field as per original logic
-                    if llm_output_item_chunk.number == input_item_detail_chunk.get('number') or \
-                       llm_output_item_chunk.number == input_item_detail_chunk.get('candidate_number'): # Accommodate both key names
+                    if self._numbers_match(llm_output_item_chunk.number, input_item_detail_chunk):
                         final_processed_outputs_for_chunk[k] = process_successful_llm_item(
                             llm_output_item_chunk,
                             input_item_detail_chunk,
@@ -280,8 +375,8 @@ class LLMChunkProcessor:
             logger.error(
                 f"[{chunk_file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] "
                 f"Failed to parse/validate JSON for chunk: JSONDecodeError - {e_parse_validate}. Error at char {e_parse_validate.pos}. "
-                f"Attempted to parse (json_candidate_str_chunk, first 1000 chars): '{json_candidate_str_chunk[:1000]}'. "
-                f"Original LLM response text (llm_response_text, first 1000 chars): '{llm_response_text[:1000]}'"
+                f"Attempted to parse (json_candidate_str_chunk, first 1000 chars): '{json_candidate_str_chunk[:1000] if 'json_candidate_str_chunk' in locals() and json_candidate_str_chunk else 'N/A'}'. "
+                f"Original LLM response text (llm_response_text, first 1000 chars): '{llm_response_text[:1000] if llm_response_text else 'N/A'}'"
             )
             for k_err, item_detail_chunk_err in enumerate(current_chunk_candidate_items):
                 if final_processed_outputs_for_chunk[k_err] is None:
@@ -290,8 +385,8 @@ class LLMChunkProcessor:
             logger.error(
                 f"[{chunk_file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}] "
                 f"Failed to parse/validate JSON for chunk: {type(e_parse_validate).__name__} - {e_parse_validate}. "
-                f"Attempted to parse (json_candidate_str_chunk): '{json_candidate_str_chunk}'. "
-                f"Original LLM response text (llm_response_text, first 1000 chars): '{llm_response_text[:1000]}...'"
+                f"Attempted to parse (json_candidate_str_chunk): '{json_candidate_str_chunk if 'json_candidate_str_chunk' in locals() else 'N/A'}'. "
+                f"Original LLM response text (llm_response_text, first 1000 chars): '{llm_response_text[:1000] if llm_response_text else 'N/A'}...'"
             )
             for k_err, item_detail_chunk_err in enumerate(current_chunk_candidate_items):
                 if final_processed_outputs_for_chunk[k_err] is None:
@@ -329,6 +424,9 @@ class LLMChunkProcessor:
         accumulated_token_stats: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         chunk_size = self.config.llm_candidate_chunk_size
+        if self.llm_provider == "gemini":
+            # Gemini is more likely to under-return items on large candidate batches.
+            chunk_size = max(1, min(chunk_size, 5))
         max_chunks = self.config.llm_max_chunks_per_url
         chunks_processed_count = 0
 
@@ -356,82 +454,29 @@ class LLMChunkProcessor:
             
             try:
                 formatted_prompt_chunk = self._prepare_prompt_for_chunk(current_chunk_candidate_items, homepage_context_input)
-                
-                # Artifact logging for prompt (optional, can be done by caller)
-                # save_llm_artifact(llm_context_dir, f"{chunk_log_prefix}_prompt.txt", formatted_prompt_chunk, logger)
-
-                generation_config_dict = {
-                    "max_output_tokens": self.config.llm_chunk_processor_max_tokens,
-                    "temperature": self.config.llm_temperature,
-                    # response_mime_type is not directly part of GenerationConfig dict for the client method,
-                    # but often handled by the client or model endpoint.
-                    # If it needs to be in a specific format for the client, adjust here.
-                    # For now, assuming the client handles mime type or it's set globally.
-                }
-                # The gemini_client.generate_content_with_retry expects a GenerationConfig object.
-                # We need to ensure that if we are constructing it from a dict, it's done correctly.
-                # The example shows direct creation: genai_types.GenerationConfig(...)
-                # Let's stick to direct creation for clarity and to match existing patterns.
-
-                generation_config = genai_types.GenerationConfig(
-                    max_output_tokens=self.config.llm_chunk_processor_max_tokens,
-                    temperature=self.config.llm_temperature,
-                    # response_mime_type="text/plain" # This is often default or handled by client
-                    # If "text/plain" is critical and supported, keep it. Otherwise, it might be implicit.
-                    # For Gemini, response_mime_type is valid.
-                    response_mime_type="text/plain"
-                )
-
-                # Use gemini_client.generate_content_with_retry()
-                # This client method should handle the actual API call and retries for network issues.
-                # It should return a structure that includes the response text and token counts.
-                llm_response_obj = self.gemini_client.generate_content_with_retry(
-                    contents=formatted_prompt_chunk,
-                    generation_config=generation_config,
+                raw_llm_response_text_chunk, parsed_llm_result_chunk, token_stats_chunk = self._call_llm_for_chunk(
+                    prompt_text=formatted_prompt_chunk,
                     file_identifier_prefix=chunk_log_prefix,
                     triggering_input_row_id=triggering_input_row_id,
-                    triggering_company_name=triggering_company_name
+                    triggering_company_name=triggering_company_name,
                 )
-                
-                raw_llm_response_text_chunk = None
-                if llm_response_obj:
-                    # Adapt based on actual structure of llm_response_obj from GeminiClient
-                    raw_llm_response_text_chunk = getattr(llm_response_obj, 'text', None) # Or equivalent
-                    if hasattr(llm_response_obj, 'usage_metadata') and llm_response_obj.usage_metadata:
-                        prompt_tokens_val = llm_response_obj.usage_metadata.prompt_token_count
-                        candidates_tokens_val = llm_response_obj.usage_metadata.candidates_token_count
-                        total_tokens_val = llm_response_obj.usage_metadata.total_token_count
-                        
-                        token_stats_chunk = {
-                            "prompt_tokens": prompt_tokens_val if prompt_tokens_val is not None else 0,
-                            "completion_tokens": candidates_tokens_val if candidates_tokens_val is not None else 0, # or completion_token_count
-                            "total_tokens": total_tokens_val if total_tokens_val is not None else 0
-                        }
-                        for key_token in accumulated_token_stats:
-                            accumulated_token_stats[key_token] += token_stats_chunk.get(key_token, 0)
-                        logger.info(f"[{chunk_log_prefix}] LLM (initial chunk) usage: {token_stats_chunk}")
-                    
-                    # Artifact logging for response
-                    # if raw_llm_response_text_chunk:
-                    #    save_llm_artifact(llm_context_dir, f"{chunk_log_prefix}_response_initial.txt", raw_llm_response_text_chunk, logger)
+                for key_token in accumulated_token_stats:
+                    accumulated_token_stats[key_token] += token_stats_chunk.get(key_token, 0)
+                logger.info(f"[{chunk_log_prefix}] LLM (initial chunk) usage: {token_stats_chunk}")
 
-                    self._process_llm_response_for_chunk(
-                        raw_llm_response_text_chunk,
-                        current_chunk_candidate_items,
-                        final_processed_outputs_for_chunk,
-                        items_needing_retry_this_pass, # Populated by _process_llm_response_for_chunk
-                        extra_outputs_for_chunk,
-                        chunk_log_prefix,
-                        triggering_input_row_id,
-                        triggering_company_name
-                    )
-                    if raw_llm_response_text_chunk:
-                        overall_raw_responses_list.append(raw_llm_response_text_chunk)
-
-                else: # No response object from LLM call
-                    logger.error(f"[{chunk_log_prefix}] No response object from LLM client for initial chunk call.")
-                    for k_err, item_detail_chunk_err in enumerate(current_chunk_candidate_items):
-                        final_processed_outputs_for_chunk[k_err] = create_error_llm_item(item_detail_chunk_err, "Error_ChunkNoLLMResponseObject", file_identifier_prefix=chunk_log_prefix, triggering_input_row_id=triggering_input_row_id, triggering_company_name=triggering_company_name)
+                self._process_llm_response_for_chunk(
+                    raw_llm_response_text_chunk,
+                    parsed_llm_result_chunk,
+                    current_chunk_candidate_items,
+                    final_processed_outputs_for_chunk,
+                    items_needing_retry_this_pass,
+                    extra_outputs_for_chunk,
+                    chunk_log_prefix,
+                    triggering_input_row_id,
+                    triggering_company_name
+                )
+                if raw_llm_response_text_chunk:
+                    overall_raw_responses_list.append(raw_llm_response_text_chunk)
 
 
             except Exception as e_initial_call:
@@ -455,78 +500,44 @@ class LLMChunkProcessor:
 
                 try:
                     formatted_prompt_retry_chunk = self._prepare_prompt_for_chunk(inputs_for_this_retry_pass_details, homepage_context_input)
-                    # save_llm_artifact(llm_context_dir, f"{retry_log_prefix}_prompt.txt", formatted_prompt_retry_chunk, logger)
-
-                    generation_config_retry = genai_types.GenerationConfig(
-                        max_output_tokens=self.config.llm_chunk_processor_max_tokens,
-                        temperature=self.config.llm_temperature,
-                        response_mime_type="text/plain"
-                    )
-
-                    llm_response_obj_retry = self.gemini_client.generate_content_with_retry(
-                        contents=formatted_prompt_retry_chunk,
-                        generation_config=generation_config_retry,
+                    raw_llm_response_text_retry_chunk, parsed_retry_result, token_stats_retry_chunk = self._call_llm_for_chunk(
+                        prompt_text=formatted_prompt_retry_chunk,
                         file_identifier_prefix=retry_log_prefix,
                         triggering_input_row_id=triggering_input_row_id,
-                        triggering_company_name=triggering_company_name
+                        triggering_company_name=triggering_company_name,
                     )
+                    for key_token_r in accumulated_token_stats:
+                        accumulated_token_stats[key_token_r] += token_stats_retry_chunk.get(key_token_r, 0)
+                    logger.info(f"[{retry_log_prefix}] LLM (mismatch retry) usage: {token_stats_retry_chunk}")
 
-                    raw_llm_response_text_retry_chunk = None
-                    if llm_response_obj_retry:
-                        raw_llm_response_text_retry_chunk = getattr(llm_response_obj_retry, 'text', None)
-                        if hasattr(llm_response_obj_retry, 'usage_metadata') and llm_response_obj_retry.usage_metadata:
-                            prompt_tokens_retry_val = llm_response_obj_retry.usage_metadata.prompt_token_count
-                            candidates_tokens_retry_val = llm_response_obj_retry.usage_metadata.candidates_token_count
-                            total_tokens_retry_val = llm_response_obj_retry.usage_metadata.total_token_count
+                    temp_processed_outputs_for_retry_pass: List[Optional[PhoneNumberLLMOutput]] = [None] * len(inputs_for_this_retry_pass_details)
+                    temp_items_needing_further_retry: List[Tuple[int, Dict[str, Any]]] = []
+                    temp_extra_outputs_for_retry_pass: List[PhoneNumberLLMOutput] = []
 
-                            token_stats_retry_chunk = {
-                                "prompt_tokens": prompt_tokens_retry_val if prompt_tokens_retry_val is not None else 0,
-                                "completion_tokens": candidates_tokens_retry_val if candidates_tokens_retry_val is not None else 0,
-                                "total_tokens": total_tokens_retry_val if total_tokens_retry_val is not None else 0
-                            }
-                            for key_token_r in accumulated_token_stats: accumulated_token_stats[key_token_r] += token_stats_retry_chunk.get(key_token_r, 0)
-                            logger.info(f"[{retry_log_prefix}] LLM (mismatch retry) usage: {token_stats_retry_chunk}")
-                        
-                        # if raw_llm_response_text_retry_chunk:
-                        #    save_llm_artifact(llm_context_dir, f"{retry_log_prefix}_response.txt", raw_llm_response_text_retry_chunk, logger)
-                        
-                        # Create temporary output list for this retry pass
-                        temp_processed_outputs_for_retry_pass: List[Optional[PhoneNumberLLMOutput]] = [None] * len(inputs_for_this_retry_pass_details)
-                        temp_items_needing_further_retry: List[Tuple[int, Dict[str, Any]]] = [] # Indices here are relative to inputs_for_this_retry_pass_details
-                        temp_extra_outputs_for_retry_pass: List[PhoneNumberLLMOutput] = []
+                    self._process_llm_response_for_chunk(
+                        raw_llm_response_text_retry_chunk,
+                        parsed_retry_result,
+                        inputs_for_this_retry_pass_details,
+                        temp_processed_outputs_for_retry_pass,
+                        temp_items_needing_further_retry,
+                        temp_extra_outputs_for_retry_pass,
+                        retry_log_prefix,
+                        triggering_input_row_id,
+                        triggering_company_name
+                    )
+                    if raw_llm_response_text_retry_chunk:
+                        overall_raw_responses_list.append(raw_llm_response_text_retry_chunk)
 
-                        self._process_llm_response_for_chunk(
-                            raw_llm_response_text_retry_chunk,
-                            inputs_for_this_retry_pass_details, # Current items being retried
-                            temp_processed_outputs_for_retry_pass, # Temp list for this pass's results
-                            temp_items_needing_further_retry,    # Items that *still* mismatch after this retry
-                            temp_extra_outputs_for_retry_pass,
-                            retry_log_prefix,
-                            triggering_input_row_id,
-                            triggering_company_name
-                        )
-                        if raw_llm_response_text_retry_chunk:
-                             overall_raw_responses_list.append(raw_llm_response_text_retry_chunk)
+                    for j_retry, processed_item_from_retry in enumerate(temp_processed_outputs_for_retry_pass):
+                        original_chunk_index = original_indices_for_this_retry_pass[j_retry]
+                        if processed_item_from_retry is not None:
+                            final_processed_outputs_for_chunk[original_chunk_index] = processed_item_from_retry
+                    if temp_extra_outputs_for_retry_pass:
+                        extra_outputs_for_chunk.extend(temp_extra_outputs_for_retry_pass)
 
-
-                        # Update final_processed_outputs_for_chunk with results from this retry pass
-                        for j_retry, processed_item_from_retry in enumerate(temp_processed_outputs_for_retry_pass):
-                            original_chunk_index = original_indices_for_this_retry_pass[j_retry]
-                            if processed_item_from_retry is not None: # If successfully processed or became an error
-                                final_processed_outputs_for_chunk[original_chunk_index] = processed_item_from_retry
-                        # Carry over any extra outputs produced during alignment in this retry pass.
-                        if temp_extra_outputs_for_retry_pass:
-                            extra_outputs_for_chunk.extend(temp_extra_outputs_for_retry_pass)
-                        
-                        # Map items from temp_items_needing_further_retry back to original chunk indices
-                        for k_further_retry, (idx_in_retry_pass, item_detail) in enumerate(temp_items_needing_further_retry):
-                            original_chunk_idx_for_further_retry = original_indices_for_this_retry_pass[idx_in_retry_pass]
-                            items_still_needing_retry_after_this_pass.append((original_chunk_idx_for_further_retry, item_detail))
-                    
-                    else: # No response object from LLM retry call
-                        logger.error(f"[{retry_log_prefix}] No response object from LLM client for mismatch retry.")
-                        # All items in this retry pass remain needing retry
-                        items_still_needing_retry_after_this_pass.extend(items_needing_retry_this_pass)
+                    for k_further_retry, (idx_in_retry_pass, item_detail) in enumerate(temp_items_needing_further_retry):
+                        original_chunk_idx_for_further_retry = original_indices_for_this_retry_pass[idx_in_retry_pass]
+                        items_still_needing_retry_after_this_pass.append((original_chunk_idx_for_further_retry, item_detail))
 
 
                 except Exception as e_retry_call:
@@ -539,6 +550,58 @@ class LLMChunkProcessor:
             # End of mismatch retry loop for the chunk
 
             # Handle items persistently mismatched after all retries for this chunk
+            if items_needing_retry_this_pass:
+                # Gemini sometimes collapses multi-item chunks into a single output object.
+                # Fall back to one-item salvage retries before giving up on those candidates.
+                if self.llm_provider == "gemini":
+                    still_unresolved_after_singletons: List[Tuple[int, Dict[str, Any]]] = []
+                    for original_idx_persist, item_detail_persist_error in items_needing_retry_this_pass:
+                        singleton_log_prefix = f"{chunk_log_prefix}_single_retry_{original_idx_persist}"
+                        try:
+                            formatted_singleton_prompt = self._prepare_prompt_for_chunk(
+                                [item_detail_persist_error],
+                                homepage_context_input,
+                            )
+                            raw_singleton_text, parsed_singleton_result, token_stats_singleton = self._call_llm_for_chunk(
+                                prompt_text=formatted_singleton_prompt,
+                                file_identifier_prefix=singleton_log_prefix,
+                                triggering_input_row_id=triggering_input_row_id,
+                                triggering_company_name=triggering_company_name,
+                            )
+                            for key_token_s in accumulated_token_stats:
+                                accumulated_token_stats[key_token_s] += token_stats_singleton.get(key_token_s, 0)
+
+                            singleton_outputs: List[Optional[PhoneNumberLLMOutput]] = [None]
+                            singleton_retry_queue: List[Tuple[int, Dict[str, Any]]] = []
+                            singleton_extra_outputs: List[PhoneNumberLLMOutput] = []
+                            self._process_llm_response_for_chunk(
+                                raw_singleton_text,
+                                parsed_singleton_result,
+                                [item_detail_persist_error],
+                                singleton_outputs,
+                                singleton_retry_queue,
+                                singleton_extra_outputs,
+                                singleton_log_prefix,
+                                triggering_input_row_id,
+                                triggering_company_name,
+                            )
+                            if raw_singleton_text:
+                                overall_raw_responses_list.append(raw_singleton_text)
+
+                            if singleton_outputs[0] is not None and not getattr(singleton_outputs[0], "type", "").startswith("Error_"):
+                                final_processed_outputs_for_chunk[original_idx_persist] = singleton_outputs[0]
+                                if singleton_extra_outputs:
+                                    extra_outputs_for_chunk.extend(singleton_extra_outputs)
+                            else:
+                                still_unresolved_after_singletons.append((original_idx_persist, item_detail_persist_error))
+                        except Exception as e_singleton:
+                            logger.warning(
+                                f"[{singleton_log_prefix}] Single-item salvage retry failed: {e_singleton}",
+                                exc_info=True,
+                            )
+                            still_unresolved_after_singletons.append((original_idx_persist, item_detail_persist_error))
+                    items_needing_retry_this_pass = still_unresolved_after_singletons
+
             if items_needing_retry_this_pass:
                 logger.warning(f"[{chunk_log_prefix}] {len(items_needing_retry_this_pass)} items remain mismatched after all retries for this chunk.")
                 for original_idx_persist, item_detail_persist_error in items_needing_retry_this_pass:

@@ -27,7 +27,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-import google.generativeai.types as genai_types
+from google.genai import types as genai_types
 
 # Ensure repo root is on sys.path so `import src...` works when running from scripts/
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -159,7 +159,7 @@ def _call_llm_short_german_summary(
         generation_config_dict["top_k"] = cfg.llm_top_k
     if getattr(cfg, "llm_top_p", None) is not None:
         generation_config_dict["top_p"] = cfg.llm_top_p
-    generation_config = genai_types.GenerationConfig(**generation_config_dict)
+    generation_config = genai_types.GenerateContentConfig(**generation_config_dict)
 
     system_instruction_text = (
         "You are a summarization/translation assistant. Your entire response MUST be a single, valid JSON formatted string. "

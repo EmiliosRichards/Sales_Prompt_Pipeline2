@@ -18,7 +18,10 @@ def determine_final_row_outcome_and_fault( # Renamed to avoid leading underscore
     canonical_site_pathful_scraper_status: Dict[str, str],
     canonical_site_raw_llm_outputs: Dict[str, List[PhoneNumberLLMOutput]],
     canonical_site_regex_candidates_found_status: Dict[str, bool],
-    canonical_site_llm_exception_details: Dict[str, str]
+    canonical_site_llm_exception_details: Dict[str, str],
+    has_exportable_top_numbers: bool = False,
+    rerank_requested: bool = False,
+    rerank_error: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Determines the final outcome reason for an input row and its fault category.
@@ -31,7 +34,13 @@ def determine_final_row_outcome_and_fault( # Renamed to avoid leading underscore
         return "Pipeline_Skipped_MaxRedirects_ForInputURL", FAULT_CATEGORY_MAP_DEFINITION["Pipeline_Skipped_MaxRedirects_ForInputURL"]
 
     if unique_sorted_consolidated_numbers:
-        return "Contact_Successfully_Extracted", "N/A"
+        if has_exportable_top_numbers:
+            return "Contact_Successfully_Extracted", "N/A"
+        if rerank_error:
+            return "Contact_Consolidated_RerankFailed_NoOperationalCallList", FAULT_CATEGORY_MAP_DEFINITION["LLM_Reranker_NoOperationalCallList"]
+        if rerank_requested:
+            return "Contact_Consolidated_NoOperationalCallList", FAULT_CATEGORY_MAP_DEFINITION["LLM_Reranker_NoOperationalCallList"]
+        return "Contact_Consolidated_NoOperationalCallList", FAULT_CATEGORY_MAP_DEFINITION["OperationalCallList_NotExported"]
 
     if not canonical_url_summary:
         if initial_row_scrape_status and initial_row_scrape_status != "Success" and initial_row_scrape_status != "Not_Run":

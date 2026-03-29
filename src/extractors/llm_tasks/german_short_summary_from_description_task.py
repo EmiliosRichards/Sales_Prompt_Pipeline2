@@ -6,17 +6,12 @@ Used primarily when running the sales pipeline with --pitch-from-description
 """
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
-
-import google.generativeai.types as genai_types
-from google.api_core import exceptions as google_exceptions
-from pydantic import ValidationError as PydanticValidationError
+from typing import Any, Dict, Optional, Tuple
 
 from ...core.config import AppConfig
 from ...core.schemas import GermanShortSummaryOutput
-from ...llm_clients.gemini_client import GeminiClient
 from ...utils.helpers import sanitize_filename_component
-from ...utils.llm_processing_helpers import load_prompt_template, save_llm_artifact, extract_json_from_text
+from ...utils.llm_processing_helpers import load_prompt_template, save_llm_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +24,7 @@ def _truncate_to_100_words(text: str) -> str:
 
 
 def generate_german_short_summary_from_description(
-    gemini_client: GeminiClient,
+    gemini_client: Any,
     config: AppConfig,
     description_text: str,
     llm_context_dir: str,
@@ -79,30 +74,18 @@ def generate_german_short_summary_from_description(
             pass
 
         max_out = int(getattr(config, "llm_max_tokens_description_de_summary", 256) or 256)
-        generation_config_dict = {
-            "response_mime_type": "text/plain",
-            "candidate_count": 1,
-            "max_output_tokens": max_out,
-            "temperature": getattr(config, "llm_temperature_extraction", 0.2),
-        }
-        if hasattr(config, "llm_top_k") and config.llm_top_k is not None:
-            generation_config_dict["top_k"] = config.llm_top_k
-        if hasattr(config, "llm_top_p") and config.llm_top_p is not None:
-            generation_config_dict["top_p"] = config.llm_top_p
-        generation_config = genai_types.GenerationConfig(**generation_config_dict)
-
         system_instruction_text = (
-            "You are a summarization/translation assistant. Your entire response MUST be a single, valid JSON formatted string. "
-            "Do NOT include any explanations, markdown formatting (like ```json), or any other text outside of this JSON string. "
-            "The JSON object must strictly conform to the GermanShortSummaryOutput schema."
+            "You translate and condense the provided company description into a short German summary. "
+            "Return only valid JSON matching the requested schema."
         )
-
-        contents_for_api: List[genai_types.ContentDict] = [{"role": "user", "parts": [{"text": formatted_prompt}]}]
         request_payload = {
             "model_name": getattr(config, "llm_model_name", ""),
             "system_instruction": system_instruction_text,
-            "user_contents": contents_for_api,
-            "generation_config": generation_config_dict,
+            "schema_name": "german_short_summary",
+            "response_model": "GermanShortSummaryOutput",
+            "max_output_tokens": max_out,
+            "temperature": getattr(config, "llm_temperature_extraction", 0.2),
+            "user_prompt": formatted_prompt,
         }
         request_payload_filename = f"{prompt_filename_base}_german_short_summary_request_payload.json"
         try:
@@ -110,23 +93,19 @@ def generate_german_short_summary_from_description(
         except Exception:
             pass
 
-        response = gemini_client.generate_content_with_retry(
-            contents=contents_for_api,
-            generation_config=generation_config,
-            system_instruction=system_instruction_text,
+        llm_result = gemini_client.generate_structured_output_with_retry(
+            user_prompt=formatted_prompt,
+            response_model=GermanShortSummaryOutput,
+            schema_name="german_short_summary",
             file_identifier_prefix=file_identifier_prefix,
             triggering_input_row_id=triggering_input_row_id,
             triggering_company_name=triggering_company_name,
+            system_prompt=system_instruction_text,
+            temperature=getattr(config, "llm_temperature_extraction", 0.2),
+            max_output_tokens=max_out,
         )
-        if not response:
-            raw_llm_response_str = "Error: No response object from GeminiClient."
-            return None, raw_llm_response_str, token_stats
-
-        raw_llm_response_str = getattr(response, "text", None)
-        if hasattr(response, "usage_metadata") and response.usage_metadata:
-            token_stats["prompt_tokens"] = response.usage_metadata.prompt_token_count or 0
-            token_stats["completion_tokens"] = response.usage_metadata.candidates_token_count or 0
-            token_stats["total_tokens"] = response.usage_metadata.total_token_count or 0
+        raw_llm_response_str = llm_result.raw_text
+        token_stats = llm_result.usage or token_stats
 
         # Save raw response artifact
         try:
@@ -139,20 +118,15 @@ def generate_german_short_summary_from_description(
         if not raw_llm_response_str or not str(raw_llm_response_str).strip():
             return None, "Error: Empty LLM response.", token_stats
 
-        json_str = extract_json_from_text(str(raw_llm_response_str))
-        if not json_str:
-            return None, "Error: Failed to extract JSON from LLM response.", token_stats
-        parsed = GermanShortSummaryOutput(**json.loads(json_str))
+        if not llm_result.parsed_output:
+            error_message = llm_result.provider_error or (
+                f"Model refusal: {llm_result.refusal}" if llm_result.refusal else "Error: Failed to parse structured German short summary."
+            )
+            return None, error_message, token_stats
+        parsed = llm_result.parsed_output
         summary = _truncate_to_100_words(parsed.german_summary)
         return summary, raw_llm_response_str, token_stats
 
-    except (json.JSONDecodeError, PydanticValidationError) as e_parse:
-        logger.error(f"{log_prefix} Failed to parse German short summary JSON: {e_parse}. Raw: '{(raw_llm_response_str or '')[:300]}'")
-        return None, f"Error: Failed to parse German short summary JSON: {str(e_parse)}", token_stats
-    except google_exceptions.GoogleAPIError as e_api:
-        logger.error(f"{log_prefix} Gemini API error during German short summary generation: {e_api}", exc_info=True)
-        error_msg = getattr(e_api, "message", str(e_api))
-        return None, f"Error: Gemini API error: {error_msg}", token_stats
     except Exception as e:
         logger.error(f"{log_prefix} Unexpected error during German short summary generation: {e}", exc_info=True)
         return None, f"Error: Unexpected error: {str(e)}", token_stats

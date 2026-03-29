@@ -6,7 +6,7 @@ import logging
 import json
 from typing import Dict, Any, List, Tuple, Optional
 
-import google.generativeai.types as genai_types
+from google.genai import types as genai_types
 from google.api_core import exceptions as google_exceptions
 from pydantic import ValidationError as PydanticValidationError
 
@@ -117,7 +117,7 @@ def generate_sales_insights(
         if hasattr(config, 'llm_top_p') and config.llm_top_p is not None:
             generation_config_dict["top_p"] = config.llm_top_p
         
-        generation_config = genai_types.GenerationConfig(**generation_config_dict)
+        generation_config = genai_types.GenerateContentConfig(**generation_config_dict)
     except AttributeError as e_attr_config:
         logger.error(f"{log_prefix} Configuration error for generation_config: {e_attr_config}")
         return None, f"Error: Configuration error for generation_config - {str(e_attr_config)}", token_stats

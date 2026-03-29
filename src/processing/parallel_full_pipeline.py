@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import queue as pyqueue
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -30,7 +31,9 @@ import pandas as pd
 from src.core.config import AppConfig
 from src.core.logging_config import setup_logging
 from src.data_handling.loader import load_and_preprocess_data
+from src.llm_clients.backpressure import effective_worker_count
 from src.llm_clients.gemini_client import GeminiClient
+from src.llm_clients.openai_client import OpenAIClient
 from src.processing.pipeline_flow import execute_pipeline_flow
 from src.utils.helpers import (
     initialize_dataframe_columns,
@@ -41,6 +44,28 @@ from src.utils.helpers import (
 logger = logging.getLogger(__name__)
 
 _PROCESS_LOGGING_CONFIGURED = False
+
+_ILLEGAL_XLSX_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
+
+
+def _sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    openpyxl rejects certain ASCII control characters in strings. These can sneak
+    in from scraped text and (especially) LLM outputs. We strip them to ensure
+    XLSX writing is robust.
+    """
+    try:
+        for col in df.columns:
+            s = df[col]
+            # Only sanitize string-like cells; preserve numeric/boolean types.
+            if s.dtype == object:
+                df[col] = s.map(
+                    lambda v: _ILLEGAL_XLSX_RE.sub("", v) if isinstance(v, str) else v
+                )
+    except Exception:
+        # Best-effort; if sanitization fails we still attempt to write.
+        pass
+    return df
 
 
 @dataclass(frozen=True)
@@ -295,7 +320,11 @@ def _worker_run_job(
 
     queue.put({"type": "job_start", "job_id": job.job_id, "row_range": job.row_range, "ts": datetime.now().isoformat()})
 
-    gemini_client = GeminiClient(config=app_config)
+    full_llm_provider = (getattr(app_config, "full_llm_provider", "gemini") or "gemini").strip().lower()
+    if full_llm_provider == "openai":
+        llm_client = OpenAIClient(config=app_config)
+    else:
+        llm_client = GeminiClient(config=app_config)
 
     df = load_and_preprocess_data(input_file_path_abs, app_config_instance=app_config)
     if df is None:
@@ -321,7 +350,7 @@ def _worker_run_job(
         execute_pipeline_flow(
             df=df,
             app_config=app_config,
-            gemini_client=gemini_client,
+            llm_client=llm_client,
             run_output_dir=job_out,
             llm_context_dir=job_ctx,
             llm_requests_dir=job_req,
@@ -362,6 +391,16 @@ def run_parallel_full_pipeline(
         total_rows = _infer_total_rows_csv(input_file_path_abs)
     else:
         total_rows = _infer_total_rows_excel(input_file_path_abs)
+    provider = (getattr(app_config, "full_llm_provider", "gemini") or "gemini").strip().lower()
+    bounded_workers = effective_worker_count(app_config, provider, workers)
+    if bounded_workers != workers:
+        logger.warning(
+            "Clamping parallel full-pipeline workers from %s to %s for provider '%s' backpressure.",
+            workers,
+            bounded_workers,
+            provider,
+        )
+    workers = bounded_workers
     jobs = _build_jobs(row_range=row_range, total_rows=total_rows, workers=workers, chunk_multiplier=4)
 
     live_csv_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.csv")
@@ -520,10 +559,16 @@ def run_parallel_full_pipeline(
         # Drop internal meta columns from final outputs (keep them only in live files).
         df_live = df_live[[c for c in df_live.columns if not str(c).startswith("__meta_")]]
         df_live.to_csv(final_csv, index=False, encoding="utf-8-sig")
-        df_live.to_excel(final_xlsx, index=False)
+        try:
+            df_live.to_excel(final_xlsx, index=False)
+        except Exception:
+            # Retry once after sanitizing illegal control characters.
+            df_live = _sanitize_df_for_excel(df_live)
+            df_live.to_excel(final_xlsx, index=False)
         logger.info(f"Wrote final combined report: {final_csv} and {final_xlsx}")
     except Exception as e:
-        logger.error(f"Failed to write final combined report: {e}", exc_info=True)
+        # Avoid logging massive/unicode-hostile strings directly; keep details in traceback.
+        logger.error("Failed to write final combined report (CSV and/or XLSX).", exc_info=True)
 
     # Final JSONL copies (end-to-end rows)
     try:

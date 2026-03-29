@@ -1264,7 +1264,8 @@ def execute_pipeline_flow(
         rank_item_by_num: Dict[str, Any] = {}
         rerank_ctx_paths: List[str] = []
         true_base_key = str(canonical_url_summary).strip() if canonical_url_summary else ""
-        if callable_numbers and getattr(app_config, "enable_phone_llm_rerank", True) and true_base_key:
+        rerank_requested = bool(callable_numbers and getattr(app_config, "enable_phone_llm_rerank", True) and true_base_key)
+        if rerank_requested:
             rerank_file_prefix = f"TRUEBASE_{sanitize_filename_component(true_base_key)}"
             # These are the standard artifacts saved by the reranker call (best-effort).
             rerank_base = sanitize_filename_component(rerank_file_prefix)
@@ -1440,6 +1441,34 @@ def execute_pipeline_flow(
         df.at[index, "BestMatchedPhoneNumbers"] = best_numbers
         other_nums = [n.number for n in unique_sorted_consolidated_numbers if n.number not in set(best_numbers)]
         df.at[index, "OtherRelevantNumbers"] = other_nums
+
+        rerank_error_value = None
+        try:
+            raw_rerank_error = df.at[index, "LLMPhoneRankingError"]
+            if raw_rerank_error not in (None, "", "nan", "NaN"):
+                rerank_error_value = str(raw_rerank_error).strip()
+        except Exception:
+            rerank_error_value = None
+
+        final_reason, fault_category = determine_final_row_outcome_and_fault(
+            index=index,
+            row_summary=row_summary,
+            df_status_snapshot=df_status_snapshot_for_helper,
+            company_contact_details_summary=company_contact_details_summary,
+            unique_sorted_consolidated_numbers=unique_sorted_consolidated_numbers,
+            canonical_url_summary=canonical_url_summary,
+            true_base_scraper_status_map=true_base_scraper_status,
+            true_base_to_pathful_map=true_base_to_pathful_map,
+            canonical_site_pathful_scraper_status=canonical_site_pathful_scraper_status,
+            canonical_site_raw_llm_outputs=canonical_site_raw_llm_outputs,
+            canonical_site_regex_candidates_found_status={str(canonical_url_summary): true_base_regex_found} if canonical_url_summary else {},
+            canonical_site_llm_exception_details=canonical_site_llm_exception_details,
+            has_exportable_top_numbers=bool(best_numbers),
+            rerank_requested=rerank_requested,
+            rerank_error=rerank_error_value,
+        )
+        df.at[index, 'Final_Row_Outcome_Reason'] = final_reason
+        df.at[index, 'Determined_Fault_Category'] = fault_category
 
         # Attach context artifact paths where available.
         ctx_paths: List[str] = []

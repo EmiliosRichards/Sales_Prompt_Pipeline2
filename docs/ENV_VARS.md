@@ -19,12 +19,30 @@ When running `main_pipeline.py --pitch-from-description`, the pipeline can still
 ---
 
 ### Phone-only and phone retrieval (quality/cost)
+- **`FULL_LLM_PROVIDER`** (default `gemini`): provider for the full sales pipeline LLM steps. Supported values: `gemini`, `openai`.
+- **`PHONE_LLM_PROVIDER`** (default `gemini`): provider for the phone-only pipeline LLM steps. Supported values: `gemini`, `openai`.
 - **`PHONE_LLM_MAX_CANDIDATES_TOTAL`** (default `120`): cap candidates sent to the phone LLM per pathful canonical URL.
 - **`PHONE_LLM_MIN_CANDIDATE_SCORE`** (default `0`): drop very low-signal regex candidates before calling the phone LLM (fallback: if this would drop everything, we still send the top-ranked candidates). Keep `0` if you want maximum recall.
 - **`PHONE_LLM_PREFER_URL_PATH_KEYWORDS`**: comma-separated keywords that increase candidate priority (default includes `kontakt,impressum,...`).
 - **`PHONE_LLM_PREFER_SNIPPET_KEYWORDS`**: comma-separated snippet keywords that increase candidate priority (default includes `tel,telefon,zentrale,...`).
 - **`ENABLE_PHONE_LLM_RERANK`** (default `True`): run a second LLM call that produces the **only** operational call list (`Top_Number_1..3`) and optionally a `MainOffice_*` backup. If the reranker is disabled, fails, or returns no ranked numbers, the `Top_*` fields remain blank (no heuristic fallback).
 - **`PHONE_LLM_RERANK_MAX_CANDIDATES`** (default `25`): maximum numbers to send to the second-stage ranking LLM per canonical base domain.
+
+Current recommended phone-only configuration:
+- `PHONE_LLM_PROVIDER="openai"`
+- `OPENAI_MODEL_NAME="gpt-5.4-mini-2026-03-17"`
+- `OPENAI_SERVICE_TIER="flex"`
+
+When `PHONE_LLM_PROVIDER=openai`, these additional variables matter:
+- **`OPENAI_API_KEY`**: required for OpenAI-backed phone extraction/reranking/homepage context.
+- **`OPENAI_MODEL_NAME`** (default `gpt-5.1-2025-11-13`): OpenAI model used for phone-only structured extraction. The current recommended production setting is `gpt-5.4-mini-2026-03-17`.
+- **`OPENAI_MODEL_NAME_SALES_INSIGHTS`** (default: same as `OPENAI_MODEL_NAME`): optional override for full-pipeline sales pitch generation when `FULL_LLM_PROVIDER=openai`.
+- **`OPENAI_SERVICE_TIER`** (default `flex`): service tier passed to the Responses API.
+- **`OPENAI_TIMEOUT_SECONDS`** (default `900`): per-request timeout.
+- **`OPENAI_FLEX_MAX_RETRIES`** (default `5`): retry count for transient/flex failures.
+- **`OPENAI_FLEX_FALLBACK_TO_AUTO`** (default `True`): if flex still fails, retry once on `auto`.
+- **`OPENAI_PROMPT_CACHE`** / **`OPENAI_PROMPT_CACHE_RETENTION`**: enable prompt caching for repeated phone prompts. The client now uses a short digest-based cache key so longer model names still work with the Responses API cache-key length limits.
+- **`OPENAI_REASONING_EFFORT`**: optional Responses API reasoning setting; usually leave blank for this phone workflow.
 
 ---
 

@@ -3,22 +3,16 @@ import json
 import os
 from typing import Dict, Any, List, Tuple, Optional, Union
 
-# New SDK imports
-import google.generativeai.types as genai_types # Standardized to google.generativeai
-from google.api_core import exceptions as google_exceptions # Keep for specific error handling
-from pydantic import ValidationError as PydanticValidationError
-
 # Project-specific imports
 from src.core.config import AppConfig
 from src.core.schemas import PhoneNumberLLMOutput, HomepageContextOutput, PhoneRankingOutput
 from src.phone_retrieval.utils.helpers import sanitize_filename_component
 from src.phone_retrieval.llm_clients.gemini_client import GeminiClient
+from src.phone_retrieval.llm_clients.openai_client import OpenAIClient
 from src.phone_retrieval.extractors.llm_chunk_processor import LLMChunkProcessor
 from src.phone_retrieval.utils.llm_processing_helpers import (
     load_prompt_template,
     save_llm_artifact,
-    adapt_schema_for_gemini,
-    extract_json_from_text,
 )
 
 
@@ -40,23 +34,31 @@ class GeminiLLMExtractor:
             config (AppConfig): Application configuration.
         """
         self.config = config
-        self.gemini_client = GeminiClient(config)
+        self.llm_provider = (getattr(self.config, "phone_llm_provider", "gemini") or "gemini").strip().lower()
+        if self.llm_provider == "openai":
+            self.llm_client = OpenAIClient(config)
+        else:
+            self.llm_client = GeminiClient(config)
         
         # Use prompt_path_minimal_classification for phone number extraction prompt
         self.phone_extraction_prompt_path = "prompts/phone_extraction_prompt.txt"
         logger.info(f"Using phone extraction prompt: {self.phone_extraction_prompt_path}")
 
         # Second-stage phone ranking prompt (LLM ranks callable business numbers for outreach)
-        self.phone_ranking_prompt_path = "prompts/phone_ranking_prompt.txt"
+        if self.llm_provider == "openai":
+            self.phone_ranking_prompt_path = "prompts/phone_ranking_prompt_openai.txt"
+        else:
+            self.phone_ranking_prompt_path = "prompts/phone_ranking_prompt_gemini.txt"
         logger.info(f"Using phone ranking prompt: {self.phone_ranking_prompt_path}")
 
 
         self.chunk_processor = LLMChunkProcessor(
             config=self.config,
-            gemini_client=self.gemini_client,
+            llm_client=self.llm_client,
+            llm_provider=self.llm_provider,
             prompt_template_path=self.phone_extraction_prompt_path # Corrected parameter name
         )
-        logger.info(f"GeminiLLMExtractor initialized, using GeminiClient and LLMChunkProcessor for phone extraction.")
+        logger.info(f"GeminiLLMExtractor initialized with provider='{self.llm_provider}' for phone extraction.")
 
     def rank_phone_numbers_for_outreach(
         self,
@@ -91,22 +93,21 @@ class GeminiLLMExtractor:
                 json.dumps(payload, ensure_ascii=False),
             )
 
-            # NOTE: The legacy `google.generativeai` SDK rejects JSON schemas containing `$defs`.
-            # To keep this robust, we rely on prompt-enforced JSON and parse manually (no response_schema).
-            gen_cfg = genai_types.GenerationConfig(
-                temperature=0.1,
-                # Some sites generate a lot of candidates; give the model enough room to finish valid JSON.
-                max_output_tokens=4096,
-                response_mime_type="application/json",
-            )
-            resp = self.gemini_client.generate_content_with_retry(
-                contents=prompt,
-                generation_config=gen_cfg,
+            structured_result = self.llm_client.generate_structured_output_with_retry(
+                user_prompt=prompt,
+                response_model=PhoneRankingOutput,
+                schema_name="phone_ranking",
                 file_identifier_prefix=file_identifier_prefix,
                 triggering_input_row_id=triggering_input_row_id,
                 triggering_company_name=company_name,
+                system_prompt=(
+                    "You rank callable business phone numbers for sales outreach. "
+                    "Return only valid JSON matching the requested schema."
+                ),
+                temperature=0.1,
+                max_output_tokens=4096,
             )
-            raw_text = getattr(resp, "text", None)
+            raw_text = structured_result.raw_text
 
             # Persist artifacts (best-effort)
             try:
@@ -126,39 +127,26 @@ class GeminiLLMExtractor:
             except Exception:
                 pass
 
-            json_str = extract_json_from_text(raw_text) if raw_text else None
-            if not json_str:
-                err = "Could not extract JSON from phone ranking response."
-                logger.warning(f"{log_prefix} {err}")
-                # Persist error artifact (best-effort)
-                try:
-                    save_llm_artifact(
-                        content=err,
-                        directory=llm_context_dir,
-                        filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_error.txt",
-                        log_prefix=log_prefix,
-                    )
-                except Exception:
-                    pass
-                return None, raw_text, err
-            try:
-                obj = json.loads(json_str)
-                parsed = PhoneRankingOutput(**obj)
+            parsed = structured_result.parsed_output
+            if parsed:
                 return parsed, raw_text, None
-            except Exception as e:
-                err = f"Failed to parse phone ranking JSON: {e}"
-                logger.warning(f"{log_prefix} {err}")
-                # Persist error artifact (best-effort)
-                try:
-                    save_llm_artifact(
-                        content=err,
-                        directory=llm_context_dir,
-                        filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_error.txt",
-                        log_prefix=log_prefix,
-                    )
-                except Exception:
-                    pass
-                return None, raw_text, err
+
+            err = structured_result.provider_error or (
+                f"Model refusal: {structured_result.refusal}"
+                if structured_result.refusal
+                else "Could not parse phone ranking response."
+            )
+            logger.warning(f"{log_prefix} {err}")
+            try:
+                save_llm_artifact(
+                    content=err,
+                    directory=llm_context_dir,
+                    filename=f"{sanitize_filename_component(file_identifier_prefix)}__phone_ranking_error.txt",
+                    log_prefix=log_prefix,
+                )
+            except Exception:
+                pass
+            return None, raw_text, err
         except Exception as e:
             err = f"Unexpected error during phone ranking: {e}"
             logger.error(f"{log_prefix} {err}", exc_info=True)
@@ -284,22 +272,16 @@ class GeminiLLMExtractor:
         # For simplicity here, let's assume `formatted_prompt` is the main content.
         # The `GeminiClient` will construct the `contents` list.
 
-        # Prepare schema for Gemini
-        gemini_schema = adapt_schema_for_gemini(HomepageContextOutput)
-
         generation_config_dict = {
             "response_mime_type": "text/plain",
-            "candidate_count": 1, # Default, can be configured
-            "max_output_tokens": self.config.llm_max_tokens, # Revert to AppConfig value
+            "candidate_count": 1,
+            "max_output_tokens": self.config.llm_max_tokens,
             "temperature": self.config.llm_temperature,
-            # Add top_k and top_p if they are set in config
         }
         if self.config.llm_top_k is not None:
             generation_config_dict["top_k"] = self.config.llm_top_k
         if self.config.llm_top_p is not None:
             generation_config_dict["top_p"] = self.config.llm_top_p
-            
-        generation_config = genai_types.GenerationConfig(**generation_config_dict) # Corrected: use genai_types
 
         system_instruction_text = ("You are a data extraction assistant. Your entire response MUST be a single, valid JSON formatted string. Do NOT include any explanations, markdown formatting (like ```json), or any other text outside of this JSON string. Within the JSON string, for the 'summary_description' field, adhere STRICTLY to a maximum of 250 characters and 2-3 short sentences. If a value is not clearly present, set it to null within the JSON.")
 
@@ -328,11 +310,11 @@ class GeminiLLMExtractor:
         # Construct `contents` as `Iterable[genai_types.ContentDict]`
         # For a single turn, this is typically one ContentDict with role 'user'.
         # The `system_instruction_text` will be passed separately to the client.
-        contents_for_api: List[genai_types.ContentDict] = [
-            genai_types.ContentDict(
-                role="user",
-                parts=[{'text': formatted_prompt}] # Use only the formatted_prompt
-            )
+        contents_for_api: List[Dict[str, Any]] = [
+            {
+                "role": "user",
+                "parts": [{"text": formatted_prompt}],
+            }
         ]
 
         # Log the request payload for debugging
@@ -357,81 +339,35 @@ class GeminiLLMExtractor:
             logger.error(f"{log_prefix} Failed to save request payload artifact: {e_save_payload}")
 
         try:
-            # Call GeminiClient with corrected parameters, including system_instruction
-            response = self.gemini_client.generate_content_with_retry(
-                contents=contents_for_api, # Original contents_for_api is fine for the client
-                generation_config=generation_config,
-                system_instruction=system_instruction_text, # Pass system instruction separately
-                file_identifier_prefix=file_identifier_prefix,
-                triggering_input_row_id=triggering_input_row_id,
-                triggering_company_name=triggering_company_name
-            )
-
             raw_llm_response_str = None
             token_stats = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             parsed_output = None
 
-            if response:
-                raw_llm_response_str = response.text
+            structured_result = self.llm_client.generate_structured_output_with_retry(
+                user_prompt=formatted_prompt,
+                response_model=HomepageContextOutput,
+                schema_name="homepage_context",
+                file_identifier_prefix=file_identifier_prefix,
+                triggering_input_row_id=triggering_input_row_id,
+                triggering_company_name=triggering_company_name,
+                system_prompt=system_instruction_text,
+            )
+            raw_llm_response_str = structured_result.raw_text
+            token_stats = structured_result.usage or token_stats
+            parsed_output = structured_result.parsed_output
+            logger.info(f"{log_prefix} LLM usage: {token_stats}")
 
-                if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                    prompt_tokens_val = response.usage_metadata.prompt_token_count
-                    candidates_tokens_val = response.usage_metadata.candidates_token_count
-                    total_tokens_val = response.usage_metadata.total_token_count
+            if raw_llm_response_str:
+                response_filename = f"{s_file_id_prefix}_rid{s_row_id}_comp{s_comp_name}_homepage_context_response.txt"
+                save_llm_artifact(
+                    content=raw_llm_response_str,
+                    directory=llm_context_dir,
+                    filename=response_filename,
+                    log_prefix=log_prefix
+                )
 
-                    token_stats["prompt_tokens"] = prompt_tokens_val if prompt_tokens_val is not None else 0
-                    token_stats["completion_tokens"] = candidates_tokens_val if candidates_tokens_val is not None else 0
-                    token_stats["total_tokens"] = total_tokens_val if total_tokens_val is not None else 0
-                else:
-                    logger.warning(f"{log_prefix} LLM usage metadata not found in response.")
-                
-                logger.info(f"{log_prefix} LLM usage: {token_stats}")
-
-                if raw_llm_response_str:
-                    response_filename = f"{s_file_id_prefix}_rid{s_row_id}_comp{s_comp_name}_homepage_context_response.txt"
-                    save_llm_artifact(
-                        content=raw_llm_response_str,
-                        directory=llm_context_dir,
-                        filename=response_filename,
-                        log_prefix=log_prefix
-                    )
-                
-                # Parsing logic moved inside the `if response:` block and correctly indented
-                if response.candidates and raw_llm_response_str:
-                    json_string_from_text: Optional[str] = None # Initialize to ensure it's always defined
-                    try:
-                        json_string_from_text = extract_json_from_text(raw_llm_response_str) # Ensure extract_json_from_text is imported
-                        if json_string_from_text:
-                            parsed_json_object = json.loads(json_string_from_text)
-                            parsed_output = HomepageContextOutput(**parsed_json_object)
-                            logger.info(f"{log_prefix} Successfully extracted, parsed, and validated homepage context from text response.")
-                        else:
-                            logger.error(f"{log_prefix} Failed to extract a JSON string from LLM's plain text response. Raw: '{raw_llm_response_str[:500]}'")
-                            # parsed_output will remain None due to its initialization
-                            
-                    except json.JSONDecodeError as e_json:
-                        logger.error(f"{log_prefix} Failed to parse extracted JSON string: {e_json}. Extracted string: '{json_string_from_text[:500] if json_string_from_text else 'N/A'}'. Raw LLM response: '{raw_llm_response_str[:200]}'")
-                        # parsed_output will remain None
-                    except PydanticValidationError as e_pydantic:
-                        logger.error(f"{log_prefix} Pydantic validation failed for homepage context: {e_pydantic}. Data: '{json_string_from_text[:500] if json_string_from_text else 'N/A'}'")
-                        # parsed_output will remain None
-                elif not response.candidates: # Handles case where response exists but no candidates
-                     logger.error(f"{log_prefix} No candidates in Gemini response for homepage context. Raw: '{raw_llm_response_str[:200] if raw_llm_response_str else 'N/A'}'")
-
-            else: # No response object from GeminiClient
-                logger.error(f"{log_prefix} No response object returned from GeminiClient for homepage context.")
-            
             return parsed_output, raw_llm_response_str, token_stats
 
-        except google_exceptions.GoogleAPIError as e_api:
-            logger.error(f"{log_prefix} Gemini API error during homepage context generation (extractor level): {e_api}")
-            error_msg = getattr(e_api, 'message', str(e_api))
-            current_raw_response = json.dumps({"error": f"Gemini API error: {error_msg}", "type": type(e_api).__name__})
-            # Ensure token_stats is returned, even if it's the default initialized one
-            return None, current_raw_response, token_stats if token_stats else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        except PydanticValidationError as e_pydantic:
-            logger.error(f"""{log_prefix} Pydantic validation failed for homepage context (extractor level): {e_pydantic}. Data: '{raw_llm_response_str[:200] if raw_llm_response_str else "N/A"}...'""")
-            return None, raw_llm_response_str, token_stats if token_stats else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         except Exception as e_gen:
             logger.error(f"{log_prefix} Unexpected error during homepage context generation (extractor level): {e_gen}", exc_info=True)
             current_raw_response = raw_llm_response_str if raw_llm_response_str else json.dumps({"error": f"Unexpected error: {str(e_gen)}", "type": type(e_gen).__name__})

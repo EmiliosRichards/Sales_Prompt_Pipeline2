@@ -16,6 +16,23 @@ import pandas as pd
 from ..core.schemas import GoldenPartnerMatchOutput, DetailedCompanyAttributes
 
 logger = logging.getLogger(__name__)
+
+_ILLEGAL_XLSX_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
+
+
+def _sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    openpyxl rejects certain ASCII control characters in strings. Strip them
+    for robust XLSX writing.
+    """
+    try:
+        for col in df.columns:
+            s = df[col]
+            if s.dtype == object:
+                df[col] = s.map(lambda v: _ILLEGAL_XLSX_RE.sub("", v) if isinstance(v, str) else v)
+    except Exception:
+        pass
+    return df
 def _parse_contacts_block(text: Optional[str]) -> str:
     """Extract 'Name | Role | Phone | Email' tuples from noisy contact text.
 
@@ -303,7 +320,11 @@ def write_sales_outreach_report(
 
         df = pd.DataFrame(report_data)
         if output_format == 'excel':
-            df.to_excel(full_path, index=False)
+            try:
+                df.to_excel(full_path, index=False)
+            except Exception:
+                df = _sanitize_df_for_excel(df)
+                df.to_excel(full_path, index=False)
             logger.info(f"Successfully wrote sales outreach report to Excel: {full_path}")
         else:
             df.to_csv(full_path, index=False, encoding='utf-8-sig')

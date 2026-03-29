@@ -1,14 +1,18 @@
+import json
 import logging
-from typing import Optional, Any, Union, Iterable
+from typing import Optional, Any, Union, Iterable, Type
 
-from google.generativeai.client import configure # Specific import for configure
-from google.generativeai.generative_models import GenerativeModel # Specific import for GenerativeModel
-from google.generativeai import types as genai_types # Explicitly alias types
+from google import genai
+from google.genai import types as genai_types
 from google.api_core import exceptions as google_api_core_exceptions
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# AppConfig is located in src/core/config.py, so use a relative import
+from src.llm_clients.backpressure import record_provider_error, record_provider_success, sleep_if_provider_cooling_down
+from pydantic import BaseModel
+
+from src.llm_clients.common import CompatLLMResponse, StructuredLLMResult, UsageMetadata
 from src.core.config import AppConfig
+from src.phone_retrieval.utils.llm_processing_helpers import adapt_schema_for_gemini, extract_json_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +29,7 @@ RETRYABLE_GEMINI_EXCEPTIONS = (
 
 class GeminiClient:
     """
-    Client for direct interactions with the Google Gemini API using the google-genai SDK.
-    Handles API key configuration, client initialization, and content generation with retries.
+    Phone-retrieval Gemini adapter using `google-genai`.
     """
 
     def __init__(self, config: AppConfig):
@@ -46,15 +49,48 @@ class GeminiClient:
             logger.error("GeminiClient: GEMINI_API_KEY not provided in AppConfig.")
             raise ValueError("GEMINI_API_KEY not found in AppConfig for GeminiClient.")
 
-        # Configure the google-genai SDK with the API key.
-        # This is typically done once per application lifecycle.
         try:
-            configure(api_key=self.config.gemini_api_key) # Direct call
-            logger.info(f"GeminiClient: configure called successfully. Default model from config: {self.config.llm_model_name}")
-        except Exception as e: # Catch a broader exception if configure itself fails
+            self.client = genai.Client(api_key=self.config.gemini_api_key)
+            logger.info("Phone GeminiClient initialized successfully with google-genai.")
+        except Exception as e:
             logger.error(f"GeminiClient: Failed during configure: {e}", exc_info=True)
             raise RuntimeError(f"Failed to configure Gemini client with API key: {e}") from e
-        # self.client attribute is removed as GenerativeModel is instantiated directly.
+
+    def _usage_metadata(self, response: Any) -> UsageMetadata:
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "usageMetadata", None)
+        if usage is None:
+            return UsageMetadata()
+        return UsageMetadata(
+            prompt_token_count=int(getattr(usage, "prompt_token_count", 0) or getattr(usage, "promptTokenCount", 0) or 0),
+            candidates_token_count=int(getattr(usage, "candidates_token_count", 0) or getattr(usage, "candidatesTokenCount", 0) or 0),
+            total_token_count=int(getattr(usage, "total_token_count", 0) or getattr(usage, "totalTokenCount", 0) or 0),
+        )
+
+    def _config_to_sdk_config(
+        self,
+        generation_config: Optional[Union[genai_types.GenerateContentConfig, dict]],
+        *,
+        system_instruction: Optional[str] = None,
+    ) -> genai_types.GenerateContentConfig:
+        if generation_config is None:
+            config_dict = {}
+        elif isinstance(generation_config, dict):
+            config_dict = {k: v for k, v in generation_config.items() if v is not None}
+        elif hasattr(generation_config, "model_dump"):
+            config_dict = {
+                k: v
+                for k, v in generation_config.model_dump(exclude_none=True).items()
+                if v is not None
+            }
+        else:
+            config_dict = {
+                key: value
+                for key, value in vars(generation_config).items()
+                if not key.startswith("_") and value is not None
+            }
+        if system_instruction:
+            config_dict["system_instruction"] = system_instruction
+        return genai_types.GenerateContentConfig(**config_dict)
 
     @retry(
         stop=stop_after_attempt(3),  # Total 3 attempts: 1 initial + 2 retries
@@ -64,39 +100,14 @@ class GeminiClient:
     )
     def generate_content_with_retry(
         self,
-        contents: Union[str, Iterable[genai_types.ContentDict]], # Use aliased types
-        generation_config: genai_types.GenerationConfig, # Use aliased types
+        contents: Union[str, Iterable[Any]],
+        generation_config: Any,
         file_identifier_prefix: str,
         triggering_input_row_id: Any,
         triggering_company_name: str,
         model_name_override: Optional[str] = None,
-        system_instruction: Optional[str] = None  # New parameter
-    ) -> genai_types.GenerateContentResponse: # Use aliased types
-        """
-        Generates content using the Gemini API via self.client.models.generate_content(),
-        with built-in retry logic for transient errors.
-
-        Args:
-            contents: The content to be sent to the model. This can be a simple string
-                      or an iterable of ContentDicts for more complex, multi-part, or multi-turn inputs.
-            generation_config: An instance of google.genai.types.GenerationConfig
-                               (includes max_output_tokens, temperature, response_mime_type, response_schema, etc.).
-            file_identifier_prefix: A string prefix for contextual logging (e.g., URL or process name).
-            triggering_input_row_id: An identifier for the input data row that triggered this call, for logging.
-            triggering_company_name: The company name associated with the input, for logging.
-            model_name_override: Optional. If provided, this model name will be used instead of
-                                 the default model specified in AppConfig.
-            system_instruction: Optional. A system-level instruction for the model.
-
-        Returns:
-            genai_types.GenerateContentResponse: The raw response object from the Gemini API.
-
-        Raises:
-            google_api_core_exceptions.GoogleAPIError: If the API call fails after all retries for a retryable error,
-                                                      or immediately for a non-retryable API error.
-            ValueError: If no model name is available (neither in config nor overridden).
-            Exception: For other unexpected errors during the API call.
-        """
+        system_instruction: Optional[str] = None
+    ) -> CompatLLMResponse:
         effective_model_name = model_name_override if model_name_override else self.config.llm_model_name
         if not effective_model_name:
             log_err_context = f"[{file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}]"
@@ -112,32 +123,134 @@ class GeminiClient:
 
         log_context = f"[{file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}, Model: {qualified_model_name}]"
 
-        logger.info(f"{log_context} Attempting Gemini API call with GenerativeModel('{qualified_model_name}').generate_content")
+        logger.info(f"{log_context} Attempting Gemini API call with client.models.generate_content")
         
         try:
-            # Instantiate the model directly
-            model = GenerativeModel(
-                model_name=qualified_model_name,
-                system_instruction=system_instruction # Pass system_instruction
-            )
-            response = model.generate_content(
+            sleep_if_provider_cooling_down(self.config, "gemini", log_context)
+            sdk_config = self._config_to_sdk_config(generation_config, system_instruction=system_instruction)
+            response = self.client.models.generate_content(
+                model=qualified_model_name,
                 contents=contents,
-                generation_config=generation_config
-                # safety_settings can be added here if needed, e.g., from AppConfig
+                config=sdk_config,
             )
-            
-            # Log if the content was blocked or if there are no candidates.
-            if response and response.prompt_feedback and response.prompt_feedback.block_reason:
-                logger.warning(f"{log_context} Gemini content generation was blocked. Reason: {response.prompt_feedback.block_reason.name}. This is typically not retried by network-level retries.")
-            
-            if not response.candidates:
-                 logger.warning(f"{log_context} Gemini API call returned no candidates. This might be due to safety filters or other reasons. Review response.prompt_feedback if available. Full response parts: {len(response.parts) if response.parts else 'N/A'}")
-
+            raw_text = getattr(response, "text", None) or ""
+            prompt_feedback = getattr(response, "prompt_feedback", None)
+            block_reason = getattr(prompt_feedback, "block_reason", None) if prompt_feedback else None
+            refusal = getattr(block_reason, "name", None) if block_reason is not None else None
+            compat_response = CompatLLMResponse(
+                text=raw_text,
+                usage_metadata=self._usage_metadata(response),
+                candidates=[{"text": raw_text}] if raw_text else [],
+                parsed=getattr(response, "parsed", None),
+                prompt_feedback=prompt_feedback,
+                status="blocked" if refusal else ("empty" if not raw_text else "success"),
+                refusal=refusal,
+                model_name=qualified_model_name,
+            )
+            if compat_response.refusal:
+                logger.warning(f"{log_context} Gemini content generation was blocked. Reason: {compat_response.refusal}.")
+            if not compat_response.candidates:
+                logger.warning(f"{log_context} Gemini API call returned no candidates/text.")
+            record_provider_success("gemini")
             logger.info(f"{log_context} Gemini API call successful.")
-            return response
+            return compat_response
         except google_api_core_exceptions.GoogleAPIError as api_error:
+            record_provider_error(self.config, "gemini", api_error, log_context)
             logger.error(f"{log_context} Gemini API error: {api_error}", exc_info=True)
-            raise # Handled by tenacity for retries or reraised if non-retryable/exhausted.
+            raise
         except Exception as e:
             logger.error(f"{log_context} Unexpected error during Gemini API call: {e}", exc_info=True)
             raise
+
+    def generate_structured_output_with_retry(
+        self,
+        *,
+        user_prompt: str,
+        response_model: Type[BaseModel],
+        schema_name: str,
+        file_identifier_prefix: str,
+        triggering_input_row_id: Any,
+        triggering_company_name: str,
+        system_prompt: Optional[str] = None,
+        model_name_override: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
+    ) -> StructuredLLMResult:
+        del schema_name
+
+        generation_config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_json_schema=adapt_schema_for_gemini(response_model),
+            temperature=self.config.llm_temperature if temperature is None else temperature,
+            max_output_tokens=self.config.llm_max_tokens if max_output_tokens is None else max_output_tokens,
+        )
+        retry_count = 0
+
+        def _parse_structured_response(resp: CompatLLMResponse) -> tuple[Optional[Any], str, str, Optional[str]]:
+            parsed_output_local = None
+            provider_error_local = resp.provider_error
+            raw_text_local = resp.text or ""
+            if isinstance(resp.parsed, response_model):
+                parsed_output_local = resp.parsed
+            elif raw_text_local:
+                try:
+                    parsed_output_local = response_model.model_validate_json(raw_text_local)
+                except Exception:
+                    json_str = extract_json_from_text(raw_text_local)
+                    if json_str:
+                        try:
+                            parsed_output_local = response_model.model_validate(json.loads(json_str))
+                        except Exception:
+                            parsed_output_local = None
+            status_local = resp.status if parsed_output_local is not None else ("parse_error" if raw_text_local else resp.status)
+            if parsed_output_local is None and not provider_error_local and raw_text_local:
+                provider_error_local = f"Failed to parse Gemini structured output for {response_model.__name__}."
+            return parsed_output_local, raw_text_local, status_local, provider_error_local
+
+        response = self.generate_content_with_retry(
+            contents=user_prompt,
+            generation_config=generation_config,
+            file_identifier_prefix=file_identifier_prefix,
+            triggering_input_row_id=triggering_input_row_id,
+            triggering_company_name=triggering_company_name,
+            model_name_override=model_name_override,
+            system_instruction=system_prompt,
+        )
+        parsed_output, raw_text, status, provider_error = _parse_structured_response(response)
+
+        if parsed_output is None and raw_text and not response.refusal:
+            retry_count = 1
+            repair_instruction = (
+                f"{(system_prompt or '').strip()} "
+                "Return one complete JSON object only. Ensure the object is fully closed and every array/string is complete."
+            ).strip()
+            repair_response = self.generate_content_with_retry(
+                contents=user_prompt,
+                generation_config=generation_config,
+                file_identifier_prefix=f"{file_identifier_prefix}_repair",
+                triggering_input_row_id=triggering_input_row_id,
+                triggering_company_name=triggering_company_name,
+                model_name_override=model_name_override,
+                system_instruction=repair_instruction,
+            )
+            repaired_output, repaired_text, repaired_status, repaired_error = _parse_structured_response(repair_response)
+            if repaired_text:
+                raw_text = repaired_text
+            if repaired_output is not None:
+                parsed_output = repaired_output
+                status = repaired_status
+                provider_error = repaired_error
+            elif repaired_error:
+                status = repaired_status
+                provider_error = repaired_error
+
+        return StructuredLLMResult(
+            parsed_output=parsed_output,
+            raw_text=raw_text,
+            usage=response.usage_metadata.as_dict(),
+            status=status,
+            refusal=response.refusal,
+            provider_error=provider_error,
+            retry_count=response.retry_count + retry_count,
+            model_name=response.model_name,
+        )

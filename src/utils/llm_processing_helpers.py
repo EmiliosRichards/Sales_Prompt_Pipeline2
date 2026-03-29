@@ -53,21 +53,49 @@ def extract_json_from_text(text_output: Optional[str]) -> Optional[str]:
     if not text_output:
         return None
 
-    # Regex to find content within ```json ... ``` or ``` ... ```,
-    # or a standalone JSON object/array.
-    # It tries to capture the content inside the innermost curly braces or square brackets.
-    match = re.search(
-        r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```|(\{.*\}|\[.*\])",
-        text_output,
-        re.DOTALL  # DOTALL allows . to match newlines
-    )
+    def _extract_balanced_json(candidate_text: str) -> Optional[str]:
+        start_positions = [
+            idx for idx, char in enumerate(candidate_text)
+            if char in "{["
+        ]
+        for start_idx in start_positions:
+            opening = candidate_text[start_idx]
+            closing = "}" if opening == "{" else "]"
+            depth = 0
+            in_string = False
+            escape = False
+            for end_idx in range(start_idx, len(candidate_text)):
+                char = candidate_text[end_idx]
+                if escape:
+                    escape = False
+                    continue
+                if char == "\\" and in_string:
+                    escape = True
+                    continue
+                if char == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if char == opening:
+                    depth += 1
+                elif char == closing:
+                    depth -= 1
+                    if depth == 0:
+                        return candidate_text[start_idx:end_idx + 1].strip()
+        return None
 
-    if match:
-        # Prioritize the content within backticks if both groups match
-        json_str = match.group(1) or match.group(2)
-        if json_str:
-            return json_str.strip()
-    
+    stripped = text_output.strip()
+    fence_matches = re.findall(r"```(?:json)?\s*(.*?)\s*```", stripped, re.DOTALL | re.IGNORECASE)
+    for fenced_block in fence_matches:
+        balanced_json = _extract_balanced_json(fenced_block.strip())
+        if balanced_json:
+            return balanced_json
+
+    balanced_json = _extract_balanced_json(stripped)
+    if balanced_json:
+        return balanced_json
+
     logger.debug(f"No clear JSON block found in LLM text output: {text_output[:200]}...")
     return None
 
@@ -169,68 +197,65 @@ def adapt_schema_for_gemini(pydantic_model_cls: Type[BaseModel]) -> Dict[str, An
         Dict[str, Any]: The modified schema dictionary.
     """
     model_schema = pydantic_model_cls.model_json_schema()
-    
-    # Process properties
-    if "properties" in model_schema:
-        for prop_name, prop_details in list(model_schema["properties"].items()):
-            if isinstance(prop_details, dict): # Ensure prop_details is a dict
-                # Remove "default" from properties
-                if "default" in prop_details:
-                    del prop_details["default"]
-                
-                # Remove "title" from individual properties
-                if "title" in prop_details:
-                    del prop_details["title"]
-                
-                # Simplify "anyOf" for Optional fields
-                if "anyOf" in prop_details and isinstance(prop_details["anyOf"], list):
-                    non_null_schemas = [
-                        s for s in prop_details["anyOf"] 
-                        if isinstance(s, dict) and s.get("type") != "null"
-                    ]
-                    if len(non_null_schemas) == 1:
-                        # Replace the property's schema with the single non-null schema
-                        # This preserves other keys at the property level if any (e.g. description)
-                        # by updating the current prop_details with the non_null_schema
-                        
-                        # Create a new dict for the simplified property, preserving original keys not in anyOf
-                        simplified_prop = {k: v for k, v in prop_details.items() if k != "anyOf"}
-                        simplified_prop.update(non_null_schemas[0])
-                        model_schema["properties"][prop_name] = simplified_prop
-                        
-                    elif len(non_null_schemas) > 1:
-                        # If multiple non-null types in anyOf (e.g. Union[str, int]),
-                        # keep the anyOf but remove the null type if present.
-                        # This case might need more specific handling based on Gemini's exact requirements for Unions.
-                        # For now, we'll just filter out the null type.
-                        prop_details["anyOf"] = non_null_schemas
-                        if not prop_details["anyOf"]: # Should not happen if there were non_null_schemas
-                             del model_schema["properties"][prop_name] # Or handle as error
-                        elif len(prop_details["anyOf"]) == 1: # If only one non-null type remains
-                             simplified_prop = {k: v for k, v in prop_details.items() if k != "anyOf"}
-                             simplified_prop.update(prop_details["anyOf"][0])
-                             model_schema["properties"][prop_name] = simplified_prop
+    defs = model_schema.get("$defs", {}) if isinstance(model_schema, dict) else {}
 
-                    # If only null was in anyOf or anyOf was malformed, it might become empty or invalid.
-                    # Pydantic usually ensures Optional[X] has X and null.
-            else:
-                logger.warning(f"Property '{prop_name}' in schema for {pydantic_model_cls.__name__} is not a dictionary. Skipping adaptation for this property.")
+    def _resolve_ref(ref: str) -> Optional[Any]:
+        if not ref.startswith("#/$defs/"):
+            return None
+        ref_name = ref.split("/")[-1]
+        return defs.get(ref_name)
 
+    def _transform(node: Any) -> Any:
+        if isinstance(node, list):
+            return [_transform(item) for item in node]
 
-    # Remove top-level "title"
-    if "title" in model_schema:
-        del model_schema["title"]
-    
-    # Remove top-level "default" if present
-    if "default" in model_schema:
-        del model_schema["default"]
+        if not isinstance(node, dict):
+            return node
 
-    # Ensure top-level "type": "object"
-    model_schema["type"] = "object"
-    
-    # Ensure "properties" key exists at top-level
-    if "properties" not in model_schema:
-        model_schema["properties"] = {}
-        
-    logger.debug(f"Adapted schema for {pydantic_model_cls.__name__}: {json.dumps(model_schema, indent=2)}")
-    return model_schema
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            resolved = _resolve_ref(ref)
+            if resolved is None:
+                return {}
+            merged = dict(resolved)
+            for key, value in node.items():
+                if key == "$ref":
+                    continue
+                merged[key] = value
+            return _transform(merged)
+
+        cleaned: Dict[str, Any] = {}
+        for key, value in node.items():
+            if key in {"title", "default", "$defs"}:
+                continue
+            cleaned[key] = _transform(value)
+
+        any_of = cleaned.get("anyOf")
+        if isinstance(any_of, list):
+            non_null = [
+                item for item in any_of
+                if not (isinstance(item, dict) and item.get("type") == "null")
+            ]
+            if len(non_null) == 1 and isinstance(non_null[0], dict):
+                replacement = dict(non_null[0])
+                if "description" in cleaned and "description" not in replacement:
+                    replacement["description"] = cleaned["description"]
+                return _transform(replacement)
+            cleaned["anyOf"] = non_null
+
+        if cleaned.get("type") == "object":
+            cleaned.setdefault("properties", {})
+            cleaned.pop("additionalProperties", None)
+
+        return cleaned
+
+    adapted = _transform(model_schema)
+    if isinstance(adapted, dict):
+        adapted.pop("$defs", None)
+        adapted.pop("title", None)
+        adapted.pop("default", None)
+        adapted["type"] = "object"
+        adapted.setdefault("properties", {})
+
+    logger.debug(f"Adapted schema for {pydantic_model_cls.__name__}: {json.dumps(adapted, indent=2)}")
+    return adapted

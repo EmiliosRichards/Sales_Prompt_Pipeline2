@@ -147,6 +147,15 @@ class WebsiteTextSummary(BaseModel):
     summary: str = Field(description="Concise summary of key information from the website, relevant for attribute extraction.")
     extracted_company_name_from_summary: Optional[str] = Field(default=None, description="Company name as identified by the LLM from the website content during summarization.")
     key_topics_mentioned: Optional[List[str]] = Field(default_factory=list, description="A list of key topics, services, or products mentioned in the website content, identified during summarization.")
+
+
+class WebsiteTextSummaryLLM(BaseModel):
+    """Structured summary fields produced directly by the LLM before enrichment."""
+    summary: str = Field(description="Concise summary of key information from the website, relevant for attribute extraction.")
+    extracted_company_name_from_summary: Optional[str] = Field(default=None, description="Company name as identified by the LLM from the website content during summarization.")
+    key_topics_mentioned: Optional[List[str]] = Field(default_factory=list, description="A list of key topics, services, or products mentioned in the website content, identified during summarization.")
+
+
 class B2BAnalysisOutput(BaseModel):
     """
     Structures the output of the B2B and customer capacity analysis LLM call.
@@ -174,6 +183,24 @@ class DetailedCompanyAttributes(BaseModel):
     company_size_category_inferred: Optional[str] = Field(default=None, description="Inferred company size category (e.g., 'Startup', 'SME', 'Large Enterprise', 'Unknown/Not Specified').")
     innovation_level_indicators_text: Optional[str] = Field(default=None, description="Textual clues about the company's innovation level or focus (e.g., 'uses innovative workshops', 'AI-supported').")
     website_clarity_notes: Optional[str] = Field(default=None, description="Notes on how clearly the business model and target group are communicated on the website, based on the summary.")
+
+
+class DetailedCompanyAttributesLLM(BaseModel):
+    """Detailed attributes produced by the LLM before the source URL is attached."""
+    b2b_indicator: Optional[bool] = Field(default=None, description="True if the company primarily serves other businesses (B2B), False if primarily private customers (B2C), null if unclear.")
+    phone_outreach_suitability: Optional[bool] = Field(default=None, description="True if the company's product/service seems suitable for telephone-based acquisition, False otherwise, null if unclear.")
+    target_group_size_assessment: Optional[str] = Field(default=None, description="Qualitative assessment of potential callable target group size (e.g., 'Appears Small', 'Appears Medium', 'Appears Large / >=500 potential', 'Unknown').")
+    industry: Optional[str] = Field(default=None, description="Primary industry of the company.")
+    products_services_offered: Optional[List[str]] = Field(default_factory=list, description="List of key products or services offered.")
+    usp_key_selling_points: Optional[List[str]] = Field(default_factory=list, description="Unique Selling Propositions or key selling points highlighted.")
+    customer_target_segments: Optional[List[str]] = Field(default_factory=list, description="Specific customer segments targeted by the company.")
+    business_model: Optional[str] = Field(default=None, description="Description of the company's business model (e.g., 'Service-oriented; Project-based consulting', 'SaaS').")
+    company_size_indicators_text: Optional[str] = Field(default=None, description="Textual clues or indicators about company size found in the summary.")
+    company_size_category_inferred: Optional[str] = Field(default=None, description="Inferred company size category (e.g., 'Startup', 'SME', 'Large Enterprise', 'Unknown/Not Specified').")
+    innovation_level_indicators_text: Optional[str] = Field(default=None, description="Textual clues about the company's innovation level or focus.")
+    website_clarity_notes: Optional[str] = Field(default=None, description="Notes on how clearly the business model and target group are communicated on the website, based on the summary.")
+
+
 class PartnerMatchOnlyOutput(BaseModel):
     """
     Structures the output of an LLM call that only performs partner matching.
@@ -197,3 +224,10 @@ class GoldenPartnerMatchOutput(BaseModel):
     avg_leads_per_day: Optional[float] = Field(default=None, description="Average number of leads per day for the matched partner.")
     rank: Optional[int] = Field(default=None, description="Rank of the matched partner (1-47).")
     scrape_status: Optional[str] = Field(default=None, description="The status of the scraping attempt.")
+
+
+class SalesPitchLLMOutput(BaseModel):
+    """Fields the LLM must return during the final sales-pitch generation step."""
+    match_score: Optional[Union[int, float, str]] = Field(default=None, description="Score indicating the strength of the match with the selected golden partner.")
+    match_rationale_features: Optional[List[str]] = Field(default_factory=list, description="List of key shared features or reasons provided by the LLM for the match.")
+    phone_sales_line: Optional[str] = Field(default=None, description="A 1-2 sentence phone sales pitch tailored to the analyzed company.")

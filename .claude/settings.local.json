@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pandas as pd; files = __import__\\(''glob''\\).glob\\(''output_data/*/*.csv''\\); recent = sorted\\(files, key=lambda x: __import__\\(''os''\\).path.getmtime\\(x\\), reverse=True\\)[:1]; print\\(recent[0] if recent else ''none''\\)\")"
+    ]
+  }
+}

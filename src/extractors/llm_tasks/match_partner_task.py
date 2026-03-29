@@ -1,28 +1,34 @@
-"""
-Handles the LLM task of matching a target company to the best golden partner.
-"""
-import logging
 import json
+import logging
+import re
 from typing import Dict, Any, List, Tuple, Optional
-
-import google.generativeai.types as genai_types
-from google.api_core import exceptions as google_exceptions
-from pydantic import ValidationError as PydanticValidationError
 
 from ...core.config import AppConfig
 from ...core.schemas import DetailedCompanyAttributes, PartnerMatchOnlyOutput
 from ...utils.helpers import sanitize_filename_component
-from ...llm_clients.gemini_client import GeminiClient
 from ...utils.llm_processing_helpers import (
     load_prompt_template,
     save_llm_artifact,
-    extract_json_from_text,
 )
 
 logger = logging.getLogger(__name__)
 
+
+def _salvage_partial_partner_match(raw_text: str) -> Optional[PartnerMatchOnlyOutput]:
+    if not raw_text:
+        return None
+    match_score_match = re.search(r'"match_score"\s*:\s*"([^"]+)"', raw_text)
+    partner_name_match = re.search(r'"matched_partner_name"\s*:\s*"([^"]+)"', raw_text)
+    if not match_score_match or not partner_name_match:
+        return None
+    return PartnerMatchOnlyOutput(
+        match_score=match_score_match.group(1).strip(),
+        matched_partner_name=partner_name_match.group(1).strip(),
+        match_rationale_features=[],
+    )
+
 def match_partner(
-    gemini_client: GeminiClient,
+    gemini_client: Any,
     config: AppConfig,
     target_attributes: DetailedCompanyAttributes,
     golden_partner_summaries: List[Dict[str, Any]],
@@ -55,9 +61,6 @@ def match_partner(
     log_prefix = f"[{file_identifier_prefix}, RowID: {triggering_input_row_id}, Company: {triggering_company_name}, Type: PartnerMatch]"
     logger.info(f"{log_prefix} Starting partner matching.")
 
-    raw_llm_response_str: Optional[str] = None
-    token_stats: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    parsed_output: Optional[PartnerMatchOnlyOutput] = None
     prompt_template_path: str = "Path not initialized"
 
     try:
@@ -69,7 +72,7 @@ def match_partner(
         formatted_prompt = formatted_prompt.replace("{{GOLDEN_PARTNER_SUMMARIES_PLACEHOLDER}}", partner_summaries_str)
     except Exception as e:
         logger.error(f"{log_prefix} Failed to load/format partner matching prompt: {e}", exc_info=True)
-        return None, f"Error: Failed to load/format prompt - {str(e)}", token_stats
+        return None, f"Error: Failed to load/format prompt - {str(e)}", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     s_file_id_prefix = sanitize_filename_component(file_identifier_prefix, max_len=15)
     s_row_id = sanitize_filename_component(str(triggering_input_row_id), max_len=8)
@@ -87,39 +90,18 @@ def match_partner(
     except Exception as e_save_prompt:
          logger.error(f"{log_prefix} Failed to save formatted prompt artifact '{prompt_filename_with_suffix}': {e_save_prompt}", exc_info=True)
 
-    try:
-        generation_config_dict = {
-            "response_mime_type": "text/plain",
-            "candidate_count": 1,
-            "max_output_tokens": config.llm_max_tokens,
-            "temperature": config.llm_temperature_extraction,
-        }
-        if hasattr(config, 'llm_top_k') and config.llm_top_k is not None:
-            generation_config_dict["top_k"] = config.llm_top_k
-        if hasattr(config, 'llm_top_p') and config.llm_top_p is not None:
-            generation_config_dict["top_p"] = config.llm_top_p
-        
-        generation_config = genai_types.GenerationConfig(**generation_config_dict)
-    except Exception as e_gen_config:
-        logger.error(f"{log_prefix} Error creating generation_config: {e_gen_config}", exc_info=True)
-        return None, f"Error: Creating generation_config - {str(e_gen_config)}", token_stats
-
     system_instruction_text = (
-        "You are a partner matching assistant. Your entire response MUST be a single, "
-        "valid JSON formatted string. Do NOT include any explanations, markdown formatting (like ```json), "
-        "or any other text outside of this JSON string. The JSON object must strictly conform to the "
-        "PartnerMatchOnlyOutput schema, including the match_score, matched_partner_name, and match_rationale_features fields."
+        "You match the target company to the best golden partner from the provided list. "
+        "Return only valid JSON matching the requested schema."
     )
-    
-    contents_for_api: List[genai_types.ContentDict] = [
-        {"role": "user", "parts": [{"text": formatted_prompt}]}
-    ]
-
     request_payload_to_log = {
-        "model_name": config.llm_model_name,
+        "model_name": getattr(config, "llm_model_name", ""),
         "system_instruction": system_instruction_text,
-        "user_contents": contents_for_api,
-        "generation_config": generation_config_dict
+        "schema_name": "partner_match_only",
+        "response_model": "PartnerMatchOnlyOutput",
+        "max_output_tokens": config.llm_max_tokens,
+        "temperature": config.llm_temperature_extraction,
+        "user_prompt": formatted_prompt,
     }
     request_payload_filename = f"{prompt_filename_base}_partner_match_request_payload.json"
     try:
@@ -133,46 +115,44 @@ def match_partner(
         logger.error(f"{log_prefix} Failed to save request payload artifact: {e_save_payload}", exc_info=True)
 
     try:
-        response = gemini_client.generate_content_with_retry(
-            contents=contents_for_api,
-            generation_config=generation_config,
-            system_instruction=system_instruction_text,
+        llm_result = gemini_client.generate_structured_output_with_retry(
+            user_prompt=formatted_prompt,
+            response_model=PartnerMatchOnlyOutput,
+            schema_name="partner_match_only",
             file_identifier_prefix=file_identifier_prefix,
             triggering_input_row_id=triggering_input_row_id,
-            triggering_company_name=triggering_company_name
+            triggering_company_name=triggering_company_name,
+            system_prompt=system_instruction_text,
+            temperature=config.llm_temperature_extraction,
+            max_output_tokens=config.llm_max_tokens,
         )
-
-        if response:
-            raw_llm_response_str = response.text
-            if raw_llm_response_str:
-                response_filename = f"{prompt_filename_base}_partner_match_response.txt"
-                try:
-                    save_llm_artifact(
-                        content=raw_llm_response_str,
-                        directory=llm_context_dir,
-                        filename=response_filename,
-                        log_prefix=log_prefix
-                    )
-                except Exception as e_save_resp:
-                    logger.error(f"{log_prefix} Failed to save raw LLM response artifact: {e_save_resp}", exc_info=True)
-            if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                token_stats["prompt_tokens"] = response.usage_metadata.prompt_token_count or 0
-                token_stats["completion_tokens"] = response.usage_metadata.candidates_token_count or 0
-                token_stats["total_tokens"] = response.usage_metadata.total_token_count or 0
-            
-            json_string_from_text = extract_json_from_text(raw_llm_response_str)
-            if json_string_from_text:
-                parsed_json_object = json.loads(json_string_from_text)
-                parsed_output = PartnerMatchOnlyOutput(**parsed_json_object)
-                logger.info(f"{log_prefix} Successfully parsed PartnerMatchOnlyOutput.")
-            else:
-                logger.error(f"{log_prefix} Failed to extract JSON from LLM response for partner matching.")
-        else:
-            logger.error(f"{log_prefix} No response from GeminiClient for partner matching.")
-            raw_llm_response_str = "Error: No response object from GeminiClient."
-
+        token_stats = llm_result.usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        if llm_result.raw_text:
+            response_filename = f"{prompt_filename_base}_partner_match_response.txt"
+            try:
+                save_llm_artifact(
+                    content=llm_result.raw_text,
+                    directory=llm_context_dir,
+                    filename=response_filename,
+                    log_prefix=log_prefix,
+                )
+            except Exception as e_save_resp:
+                logger.error(f"{log_prefix} Failed to save raw LLM response artifact: {e_save_resp}", exc_info=True)
+        if llm_result.parsed_output:
+            logger.info(f"{log_prefix} Successfully parsed PartnerMatchOnlyOutput.")
+            return llm_result.parsed_output, llm_result.raw_text, token_stats
+        salvaged_output = _salvage_partial_partner_match(llm_result.raw_text or "")
+        if salvaged_output is not None:
+            logger.warning(
+                f"{log_prefix} Salvaged partial PartnerMatchOnlyOutput from malformed structured response."
+            )
+            return salvaged_output, llm_result.raw_text, token_stats
+        error_message = llm_result.provider_error or (
+            f"Model refusal: {llm_result.refusal}" if llm_result.refusal else "Failed to parse partner matching structured output."
+        )
+        logger.error(f"{log_prefix} {error_message}")
+        return None, llm_result.raw_text or error_message, token_stats
     except Exception as e_gen:
         logger.error(f"{log_prefix} Unexpected error during partner matching: {e_gen}", exc_info=True)
         raw_llm_response_str = json.dumps({"error": f"Unexpected error: {str(e_gen)}", "type": type(e_gen).__name__})
-
-    return parsed_output, raw_llm_response_str, token_stats
+        return None, raw_llm_response_str, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}

@@ -55,16 +55,29 @@ def load_golden_partners(file_path: str) -> List[Dict[str, Any]]:
             logger.error(f"Unsupported file type for golden partners: {file_path}. Please use CSV or Excel.")
             return partners
         
+        # NOTE: This mapping is intentionally tolerant to small header variations between
+        # different versions of the golden-partner spreadsheet.
         column_mapping = {
             'Company Name': 'name',
+            # Some legacy sheets used a German "Beschreibung" column; current canonical sheet
+            # stores narrative notes in "Source Document Section/Notes".
             'Beschreibung': 'description',
             'Industry': 'industry',
+            # The canonical sheet currently uses "/" (not "&") in this header.
+            'USP (Unique Selling Proposition) / Key Selling Points': 'usp',
             'USP (Unique Selling Proposition) & Key Selling Points': 'usp',
             'Products/Services Offered': 'services_products',
             'Customer Target Segments': 'target_audience',
             'Business Model': 'business_model',
             'Company Size Category': 'company_size',
             'Innovation Level Indicators': 'innovation_level',
+            'Geographic Reach': 'geographic_reach',
+            # This is the best place to store "why they are our partner" / proof points
+            # without changing the downstream architecture.
+            'Source Document Section/Notes': 'partnership_notes',
+            'Website': 'website',
+            'Email': 'email',
+            'Phone': 'phone',
             'Avg Leads Per Day': 'avg_leads_per_day',
             'Rank (1-47)': 'rank'
         }
@@ -111,7 +124,9 @@ def summarize_golden_partner(partner_data: Dict[str, Any]) -> Dict[str, Any]:
         ('target_audience', 'Target Audience'),
         ('business_model', 'Business Model'),
         ('company_size', 'Company Size'),
-        ('innovation_level', 'Innovation Level')
+        ('innovation_level', 'Innovation Level'),
+        ('geographic_reach', 'Geographic Reach'),
+        ('partnership_notes', 'Partnership Notes'),
     ]
 
     summary_parts = []
@@ -123,11 +138,26 @@ def summarize_golden_partner(partner_data: Dict[str, Any]) -> Dict[str, Any]:
 
     summary_str = "; ".join(summary_parts) if summary_parts else "Partner data not available or insufficient for summary."
 
+    # Return both the compact summary string AND structured fields.
+    # Downstream prompts receive JSON for each partner, so extra keys are safe and useful.
     return {
         "name": partner_data.get("name", "Unknown Partner"),
         "summary": summary_str,
         "avg_leads_per_day": partner_data.get("avg_leads_per_day"),
-        "rank": partner_data.get("rank")
+        "rank": partner_data.get("rank"),
+        # Structured fields (optional)
+        "industry": partner_data.get("industry", ""),
+        "usp": partner_data.get("usp", ""),
+        "services_products": partner_data.get("services_products", ""),
+        "target_audience": partner_data.get("target_audience", ""),
+        "business_model": partner_data.get("business_model", ""),
+        "company_size": partner_data.get("company_size", ""),
+        "innovation_level": partner_data.get("innovation_level", ""),
+        "geographic_reach": partner_data.get("geographic_reach", ""),
+        "partnership_notes": partner_data.get("partnership_notes", ""),
+        "website": partner_data.get("website", ""),
+        "email": partner_data.get("email", ""),
+        "phone": partner_data.get("phone", ""),
     }
 
 

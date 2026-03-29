@@ -1,0 +1,29 @@
+Your primary task is to analyze the provided [Target Company Attributes JSON] and the [List of Golden Partner Summaries]. Your goal is to identify the most relevant "Golden Partner" to use as a case study.
+
+Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Do not wrap the JSON in markdown formatting like ```json. Your response must begin with '{' and end with '}'.
+
+**CRITICAL MATCHING CRITERIA:**
+1.  **Primary Filter: Shared Industry/Audience.** Identify explicit similarities in industry terms, products/services offered, and target audience segments. Consider matches high-confidence when there's a direct semantic match or substantial overlap in key industry or target audience terms.
+2.  **Secondary Filter: Rank.** If multiple partners share equally relevant similarities, choose the partner with the better (lower numeric) rank.
+3.  **No Match Condition.** For the `matched_partner_name` return "No suitable match found" ONLY if there is no direct semantic or substantial overlap in the industry or target audience. `match_score` of "Low". Do not force a match. Do NOT return "No suitable match" when at least one significant keyword or audience segment is shared explicitly.
+
+4.  **Identify Key Rationale (in German).** Based on the shared attributes, provide a list of 2-4 key reasons for the match in the `match_rationale_features` field. These should be concise, clear, and in German. Examples: "Gemeinsame Zielgruppe: ...", "Ähnliche Produkte/Services: ...", "Überschneidende Marktsegmente: ..."
+
+**JSON Response Format:**
+{
+  "match_score": "High",
+  "matched_partner_name": "Partner Name",
+  "match_rationale_features": [
+    "Gemeinsame Zielgruppe im Gesundheitsbereich, speziell Einrichtungen mit hohem Bedarf an technologiebasierten Lösungen.",
+    "Ähnliche technologische Ausrichtung: Software und assistive Technologien zur Verbesserung der Patientenversorgung und Mobilität."
+  ]
+}
+
+--------TARGET COMPANY ATTRIBUTES JSON------------
+{{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}
+-----------END OF JSON-----------------
+
+--------LIST OF GOLDEN PARTNER SUMMARIES------------
+{{GOLDEN_PARTNER_SUMMARIES_PLACEHOLDER}}
+-----------END OF SUMMARIES-----------------
+

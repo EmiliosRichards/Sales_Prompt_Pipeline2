@@ -49,6 +49,13 @@ def setup_logging(
     )
 
     # Console Handler
+    # On Windows, the console encoding can be cp1252 and crash on emoji/unicode.
+    # Prefer reconfiguring stdout in-place to avoid wrapper lifetime/close issues.
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(console_log_level)
     console_handler.setFormatter(formatter)
