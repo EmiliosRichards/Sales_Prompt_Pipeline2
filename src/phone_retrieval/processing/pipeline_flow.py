@@ -118,9 +118,9 @@ def _extract_person_contacts(numbers: List[ConsolidatedPhoneNumber]) -> List[Dic
         if (n.classification or "").strip().lower() == "non-business":
             continue
         for s in (n.sources or []):
-            name = (getattr(s, "associated_person_name", None) or "").strip()
-            role = (getattr(s, "associated_person_role", None) or "").strip()
-            dept = (getattr(s, "associated_person_department", None) or "").strip()
+            name = _clean_optional_person_text(getattr(s, "associated_person_name", None))
+            role = _clean_optional_person_text(getattr(s, "associated_person_role", None))
+            dept = _clean_optional_person_text(getattr(s, "associated_person_department", None))
             is_dd = getattr(s, "is_direct_dial", None)
             t = (getattr(s, "type", None) or "")
             if "fax" in str(t).lower() or "telefax" in str(t).lower():
@@ -153,6 +153,15 @@ def _extract_person_contacts(numbers: List[ConsolidatedPhoneNumber]) -> List[Dic
     return uniq
 
 
+def _clean_optional_person_text(value: Any) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in {"null", "none", "n/a", "na", "nil", "<null>"}:
+        return ""
+    return text
+
+
 def _pick_best_person_contact(contacts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not contacts:
         return None
@@ -175,6 +184,61 @@ def _pick_best_person_contact(contacts: List[Dict[str, Any]]) -> Optional[Dict[s
     if score(best) < 90:
         return None
     return best
+
+
+def _is_imprint_or_legal_source_path(path_or_url: str) -> bool:
+    low = (path_or_url or "").strip().lower()
+    if not low:
+        return False
+    markers = ("impressum", "imprint", "legal", "legal-notice", "privacy", "datenschutz", "terms", "agb")
+    return any(marker in low for marker in markers)
+
+
+def _looks_personal_or_mobile_candidate(n: ConsolidatedPhoneNumber, ranking_item: Any) -> bool:
+    item_type = (getattr(ranking_item, "type", None) or "").strip().lower()
+    if any(marker in item_type for marker in ("mobile", "mobil", "handy", "cell", "direct", "personal")):
+        return True
+    if _clean_optional_person_text(getattr(ranking_item, "associated_person_name", None)):
+        return True
+    for src in (n.sources or []):
+        if _clean_optional_person_text(getattr(src, "associated_person_name", None)):
+            return True
+        if getattr(src, "is_direct_dial", None) is True:
+            return True
+    return False
+
+
+def _has_commercial_role_signal(n: ConsolidatedPhoneNumber, ranking_item: Any) -> bool:
+    signals: List[str] = []
+    for value in (
+        getattr(ranking_item, "associated_person_role", None),
+        getattr(ranking_item, "associated_person_department", None),
+    ):
+        cleaned = _clean_optional_person_text(value)
+        if cleaned:
+            signals.append(cleaned)
+    for src in (n.sources or []):
+        role = _clean_optional_person_text(getattr(src, "associated_person_role", None))
+        dept = _clean_optional_person_text(getattr(src, "associated_person_department", None))
+        typ = (getattr(src, "type", None) or "").strip()
+        if role:
+            signals.append(role)
+        if dept:
+            signals.append(dept)
+        if typ:
+            signals.append(typ)
+    return any(_role_score(signal) >= 80 for signal in signals)
+
+
+def _should_skip_top_ranked_candidate(n: ConsolidatedPhoneNumber, ranking_item: Any) -> bool:
+    if not _looks_personal_or_mobile_candidate(n, ranking_item):
+        return False
+    if _has_commercial_role_signal(n, ranking_item):
+        return False
+    return any(
+        _is_imprint_or_legal_source_path(getattr(src, "source_path", None) or getattr(src, "original_full_url", None) or "")
+        for src in (n.sources or [])
+    )
 
 
 def _rank_consolidated_numbers_for_diagnostics(numbers: List[ConsolidatedPhoneNumber]) -> List[ConsolidatedPhoneNumber]:
@@ -207,8 +271,8 @@ def _rank_consolidated_numbers_for_diagnostics(numbers: List[ConsolidatedPhoneNu
     def person_bonus(n: ConsolidatedPhoneNumber) -> int:
         bonus = 0
         for s in (n.sources or []):
-            role = getattr(s, "associated_person_role", None) or ""
-            name = getattr(s, "associated_person_name", None) or ""
+            role = _clean_optional_person_text(getattr(s, "associated_person_role", None))
+            name = _clean_optional_person_text(getattr(s, "associated_person_name", None))
             is_dd = getattr(s, "is_direct_dial", None)
             if not (name.strip() or is_dd is True):
                 continue
@@ -335,9 +399,9 @@ def _build_phone_rerank_candidates(
                     "source_url": getattr(s, "original_full_url", None),
                     "source_path": getattr(s, "source_path", None),
                     "type": getattr(s, "type", None),
-                    "associated_person_name": getattr(s, "associated_person_name", None),
-                    "associated_person_role": getattr(s, "associated_person_role", None),
-                    "associated_person_department": getattr(s, "associated_person_department", None),
+                    "associated_person_name": _clean_optional_person_text(getattr(s, "associated_person_name", None)) or None,
+                    "associated_person_role": _clean_optional_person_text(getattr(s, "associated_person_role", None)) or None,
+                    "associated_person_department": _clean_optional_person_text(getattr(s, "associated_person_department", None)) or None,
                     "is_direct_dial": getattr(s, "is_direct_dial", None),
                 }
             )
@@ -1321,6 +1385,13 @@ def execute_pipeline_flow(
                         pr = ""
                     if pr == "low value":
                         continue
+                    if _should_skip_top_ranked_candidate(n_obj, item):
+                        logger.info(
+                            "[RowID: %s] Skipping top-ranked phone candidate '%s' because it looks personal/mobile from imprint/legal sources without a commercial role signal.",
+                            index,
+                            getattr(item, "number", None),
+                        )
+                        continue
                     rank_item_by_num[n_obj.number] = item
                     ranked_for_outreach.append(n_obj)
                     if len(ranked_for_outreach) >= 3:
@@ -1492,14 +1563,14 @@ def execute_pipeline_flow(
                 it = rank_item_by_num.get(getattr(top_n, "number", None))
                 if it is None:
                     continue
-                nm = getattr(it, "associated_person_name", None)
+                nm = _clean_optional_person_text(getattr(it, "associated_person_name", None))
                 if nm:
                     rerank_person = it
                     break
         if rerank_person:
-            df.at[index, "BestPersonContactName"] = getattr(rerank_person, "associated_person_name", None)
-            df.at[index, "BestPersonContactRole"] = getattr(rerank_person, "associated_person_role", None)
-            df.at[index, "BestPersonContactDepartment"] = getattr(rerank_person, "associated_person_department", None)
+            df.at[index, "BestPersonContactName"] = _clean_optional_person_text(getattr(rerank_person, "associated_person_name", None)) or None
+            df.at[index, "BestPersonContactRole"] = _clean_optional_person_text(getattr(rerank_person, "associated_person_role", None)) or None
+            df.at[index, "BestPersonContactDepartment"] = _clean_optional_person_text(getattr(rerank_person, "associated_person_department", None)) or None
             df.at[index, "BestPersonContactNumber"] = getattr(rerank_person, "number", None)
         else:
             best_contact = _pick_best_person_contact(contacts)

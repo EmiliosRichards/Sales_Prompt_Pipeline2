@@ -1,0 +1,60 @@
+[
+  {
+    "case_id": "abaut_gmbh",
+    "allowed_partners": ["SitePlan GmbH"],
+    "expected_confidence": "strong",
+    "requires_pitch": true,
+    "judgement_note": "abaut focuses on supplier/procurement digitization, which is the clearest fit in the current golden partner set."
+  },
+  {
+    "case_id": "loom_gmbh",
+    "allowed_partners": ["Digitalagentur1 GmbH"],
+    "expected_confidence": "strong",
+    "requires_pitch": true,
+    "judgement_note": "LOOM is a digital/web growth agency profile and should map to the digital-agency partner rather than a generic SaaS/process match."
+  },
+  {
+    "case_id": "meplato_gmbh",
+    "allowed_partners": ["SitePlan GmbH"],
+    "expected_confidence": "strong",
+    "requires_pitch": true,
+    "judgement_note": "Meplato sits in procurement/supplier management, making SitePlan the strongest judged partner match among the current options."
+  },
+  {
+    "case_id": "xpln_gmbh",
+    "allowed_partners": ["uberblick.io", "Workflow Partner GmbH"],
+    "expected_confidence": "weak",
+    "requires_pitch": true,
+    "judgement_note": "XPLN should only match when the system can justify the overlap through workflow / document-process common ground rather than generic SaaS language."
+  },
+  {
+    "case_id": "moqo_gmbh",
+    "allowed_partners": ["Mobility Partner GmbH"],
+    "expected_confidence": "strong",
+    "requires_pitch": true,
+    "judgement_note": "MOQO is a mobility / shared-use operations case and should only map to a partner with real mobility-operations overlap."
+  },
+  {
+    "case_id": "azowo_gmbh",
+    "allowed_partners": ["Mobility Partner GmbH"],
+    "expected_confidence": "strong",
+    "requires_pitch": true,
+    "judgement_note": "AZOWO should align on fleet / mobility workflow common ground rather than broad automation claims."
+  },
+  {
+    "case_id": "entiac_gmbh",
+    "allowed_partners": [],
+    "expect_no_match": true,
+    "expected_confidence": "no_match",
+    "requires_pitch": true,
+    "judgement_note": "ENTIAC is a good judged no-match case unless the system can surface real shared audience or workflow evidence."
+  },
+  {
+    "case_id": "21strategies_gmbh",
+    "allowed_partners": [],
+    "expect_no_match": true,
+    "expected_confidence": "no_match",
+    "requires_pitch": true,
+    "judgement_note": "21strategies should not receive a forced partner unless the overlap is concretely evidenced; this is a key false-positive guardrail."
+  }
+]

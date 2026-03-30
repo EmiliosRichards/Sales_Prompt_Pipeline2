@@ -24,6 +24,44 @@ config_instance = AppConfig()
 # Setup logger for this module
 logger = logging.getLogger(__name__)
 
+_COOKIE_ATTR_KEYWORDS = (
+    "cookie",
+    "consent",
+    "gdpr",
+    "onetrust",
+    "didomi",
+    "cookiebot",
+    "usercentrics",
+    "cookie-banner",
+    "cookiebanner",
+    "cc-window",
+    "cmplz",
+    "privacy-center",
+    "privacycenter",
+)
+_COOKIE_TEXT_MARKERS = (
+    "this website uses cookies",
+    "we use cookies",
+    "cookie settings",
+    "cookie preferences",
+    "privacy preference",
+    "consent preferences",
+    "accept all",
+    "reject all",
+    "allow all",
+    "manage preferences",
+    "show details",
+    "alle akzeptieren",
+    "alle ablehnen",
+    "cookie einstellungen",
+    "datenschutzeinstellungen",
+    "zustimmung verwalten",
+    "consent",
+    "cookie",
+)
+_COOKIE_STRONG_TEXT_MARKERS = tuple(marker for marker in _COOKIE_TEXT_MARKERS if " " in marker)
+_COOKIE_PHONE_OR_EMAIL_RE = re.compile(r"(\+\d[\d\s()\-/.]{5,}\d|[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})", re.IGNORECASE)
+
 def _is_httpx_fallback_html_usable(
     html: str,
     input_row_id: Any,
@@ -59,6 +97,51 @@ def _is_httpx_fallback_html_usable(
             return False, f"rejected_block_keyword:{kw}"
 
     return True, "usable"
+
+
+def _strip_cookie_banner_nodes(soup: BeautifulSoup) -> None:
+    for tag in list(soup.find_all(True)):
+        try:
+            attr_parts = []
+            for attr_name in ("id", "class", "aria-label", "data-testid", "data-test", "data-cy", "role"):
+                value = tag.get(attr_name)
+                if isinstance(value, list):
+                    attr_parts.extend(str(v) for v in value if v)
+                elif value:
+                    attr_parts.append(str(value))
+            attr_blob = " ".join(attr_parts).lower()
+            if not attr_blob or not any(keyword in attr_blob for keyword in _COOKIE_ATTR_KEYWORDS):
+                continue
+
+            text_snippet = re.sub(r"\s+", " ", tag.get_text(" ", strip=True)).strip().lower()
+            if not text_snippet:
+                continue
+            if len(text_snippet) > 1500:
+                # Cookie banners are usually small. Large containers are too risky to remove.
+                continue
+            if _COOKIE_PHONE_OR_EMAIL_RE.search(text_snippet):
+                continue
+
+            strong_hits = sum(1 for marker in _COOKIE_STRONG_TEXT_MARKERS if marker in text_snippet)
+            generic_hits = sum(1 for marker in ("cookie", "consent") if marker in text_snippet)
+            if strong_hits >= 1 or (generic_hits >= 1 and len(text_snippet) <= 300):
+                tag.decompose()
+        except Exception:
+            continue
+
+
+def _is_cookie_boilerplate_line(line: str) -> bool:
+    low = (line or "").strip().lower()
+    if not low:
+        return True
+    if _COOKIE_PHONE_OR_EMAIL_RE.search(low):
+        return False
+    hits = sum(1 for marker in _COOKIE_TEXT_MARKERS if marker in low)
+    if hits >= 2:
+        return True
+    if ("cookie" in low or "consent" in low) and len(low) <= 240:
+        return True
+    return False
 
 def normalize_url(url: str) -> str:
     """
@@ -324,12 +407,25 @@ async def fetch_page_content(
         return None, -5, "playwright_exception", httpx_attempted, httpx_result # Generic exception
 
 def extract_text_from_html(html_content: str) -> str:
-    if not html_content: return ""
+    if not html_content:
+        return ""
     soup = BeautifulSoup(html_content, 'html.parser')
     for script_or_style in soup(["script", "style"]):
         script_or_style.decompose()
-    text = soup.get_text(separator=' ', strip=True)
-    text = re.sub(r'\s+', ' ', text).strip()
+    _strip_cookie_banner_nodes(soup)
+    raw_text = soup.get_text(separator='\n', strip=True)
+    cleaned_lines: List[str] = []
+    seen = set()
+    for raw_line in raw_text.splitlines():
+        line = re.sub(r'\s+', ' ', raw_line).strip()
+        if not line or _is_cookie_boilerplate_line(line):
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned_lines.append(line)
+    text = "\n".join(cleaned_lines).strip()
     return text
 
 def find_internal_links(html_content: str, base_url: str, input_row_id: Any, company_name_or_id: str) -> List[Tuple[str, int]]:

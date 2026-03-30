@@ -10,7 +10,12 @@ This module provides utilities to:
 import pandas as pd
 import logging
 import os # For the example usage block
+import hashlib
+import re
 from typing import List, Dict, Any
+from urllib.parse import urlparse
+
+from ..matching.taxonomy import infer_match_taxonomy
 
 # Configure logging
 try:
@@ -99,6 +104,103 @@ def load_golden_partners(file_path: str) -> List[Dict[str, Any]]:
     return partners
 
 
+def _clean_partner_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"n/a", "na", "none", "null", "nan"}:
+        return ""
+    return text
+
+
+def _slugify_partner_name(value: Any) -> str:
+    text = _clean_partner_text(value).lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text or "unknown-partner"
+
+
+def _normalize_partner_website(value: Any) -> str:
+    raw = _clean_partner_text(value)
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"https://{raw}"
+    try:
+        parsed = urlparse(candidate)
+        host = (parsed.netloc or parsed.path or "").strip().lower()
+        host = host.removeprefix("www.")
+        return host
+    except Exception:
+        return raw.lower().removeprefix("www.")
+
+
+def _build_partner_id(partner_data: Dict[str, Any]) -> str:
+    name_slug = _slugify_partner_name(partner_data.get("name"))
+    stable_source = "|".join(
+        [
+            _clean_partner_text(partner_data.get("name")),
+            _normalize_partner_website(partner_data.get("website")),
+            _clean_partner_text(partner_data.get("rank")),
+        ]
+    )
+    digest = hashlib.sha1(stable_source.encode("utf-8")).hexdigest()[:8]
+    return f"{name_slug}-{digest}"
+
+
+def _build_partner_aliases(partner_data: Dict[str, Any]) -> List[str]:
+    aliases: List[str] = []
+    name = _clean_partner_text(partner_data.get("name"))
+    website_host = _normalize_partner_website(partner_data.get("website"))
+    if name:
+        aliases.append(name)
+        aliases.append(re.sub(r"\b(gmbh|ug|inc|llc|ag|kg|ltd|mbh)\b", "", name, flags=re.I).strip(" ,.-"))
+    if website_host:
+        aliases.append(website_host)
+        aliases.append(website_host.split(".")[0])
+    deduped: List[str] = []
+    seen = set()
+    for alias in aliases:
+        cleaned = _clean_partner_text(alias)
+        low = cleaned.lower()
+        if cleaned and low not in seen:
+            seen.add(low)
+            deduped.append(cleaned)
+    return deduped
+
+
+def _build_partner_match_profile(partner_data: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "target_audience": _clean_partner_text(partner_data.get("target_audience")),
+        "services_products": _clean_partner_text(partner_data.get("services_products")),
+        "usp": _clean_partner_text(partner_data.get("usp")),
+        "industry": _clean_partner_text(partner_data.get("industry")),
+        "business_model": _clean_partner_text(partner_data.get("business_model")),
+    }
+
+
+def _build_partner_match_summary(match_profile: Dict[str, str]) -> str:
+    ordered_fields = [
+        ("industry", "Industry"),
+        ("target_audience", "Target Audience"),
+        ("services_products", "Services/Products"),
+        ("usp", "USP"),
+        ("business_model", "Business Model"),
+    ]
+    parts = [
+        f"{label}: {match_profile[key]}"
+        for key, label in ordered_fields
+        if match_profile.get(key)
+    ]
+    return "; ".join(parts)
+
+
+def _build_partner_match_taxonomy(match_profile: Dict[str, str]) -> Dict[str, List[str]]:
+    return infer_match_taxonomy(
+        match_profile.get("target_audience", ""),
+        match_profile.get("services_products", ""),
+        match_profile.get("usp", ""),
+        match_profile.get("industry", ""),
+        match_profile.get("business_model", ""),
+    )
+
+
 def summarize_golden_partner(partner_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Creates a concise summary for a single golden partner.
@@ -137,12 +239,22 @@ def summarize_golden_partner(partner_data: Dict[str, Any]) -> Dict[str, Any]:
             summary_parts.append(f"{display_name}: {value.strip()}")
 
     summary_str = "; ".join(summary_parts) if summary_parts else "Partner data not available or insufficient for summary."
+    partner_id = _build_partner_id(partner_data)
+    partner_aliases = _build_partner_aliases(partner_data)
+    match_profile = _build_partner_match_profile(partner_data)
+    match_summary = _build_partner_match_summary(match_profile)
+    match_taxonomy = _build_partner_match_taxonomy(match_profile)
 
     # Return both the compact summary string AND structured fields.
     # Downstream prompts receive JSON for each partner, so extra keys are safe and useful.
     return {
+        "partner_id": partner_id,
         "name": partner_data.get("name", "Unknown Partner"),
+        "partner_aliases": partner_aliases,
         "summary": summary_str,
+        "match_candidate_summary": match_summary,
+        "match_profile": match_profile,
+        "match_taxonomy": match_taxonomy,
         "avg_leads_per_day": partner_data.get("avg_leads_per_day"),
         "rank": partner_data.get("rank"),
         # Structured fields (optional)

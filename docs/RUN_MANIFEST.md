@@ -10,6 +10,7 @@ This repo now records a **machine-readable snapshot** of how each pipeline run w
     - run id, start/end timestamps, duration, status
     - CLI `argv` + parsed args (where available)
     - sanitized `AppConfig` snapshot (prompt paths, model, scraper/phone flags, etc.)
+    - worker concurrency metadata (`requested_workers`, `effective_workers`, provider, provider ceiling)
     - input file metadata (path, size, mtime)
     - git versioning (commit, branch, dirty)
     - output file inventory + optional CSV row counts
@@ -37,4 +38,5 @@ set RUN_MANIFEST_COUNT_ROWS=False
 
 - Secrets (API keys, tokens, passwords) are **redacted** in config snapshots.
 - Manifest writing is **best-effort**: it should never crash a run.
+- Current default provider worker ceiling is `6` unless overridden via `PROVIDER_MAX_INFLIGHT_*`.
 

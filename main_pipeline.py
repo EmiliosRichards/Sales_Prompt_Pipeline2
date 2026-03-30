@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from src.data_handling.loader import load_and_preprocess_data
 # from src.data_handling.consolidator import get_canonical_base_url, generate_processed_contacts_report # Moved to report orchestrator
-from src.llm_clients.backpressure import effective_worker_count
+from src.llm_clients.backpressure import effective_worker_count, provider_max_inflight
 from src.llm_clients.gemini_client import GeminiClient
 from src.llm_clients.openai_client import OpenAIClient
 from src.core.schemas import GoldenPartnerMatchOutput # For the new pipeline result
@@ -192,6 +192,18 @@ def main(args) -> None:
     input_file_path_abs = resolve_path(app_config.input_excel_file_path, BASE_FILE_PATH_FOR_RESOLVE) # Use helper
     logger.info(f"Resolved input file path: {input_file_path_abs}")
 
+    full_llm_provider = (getattr(app_config, "full_llm_provider", "gemini") or "gemini").strip().lower()
+    requested_workers = max(1, int(getattr(args, "workers", 1) or 1))
+    effective_workers = effective_worker_count(app_config, full_llm_provider, requested_workers)
+    provider_worker_ceiling = provider_max_inflight(app_config, full_llm_provider)
+    logger.info(
+        "Worker concurrency summary: requested=%s effective=%s provider=%s ceiling=%s",
+        requested_workers,
+        effective_workers,
+        full_llm_provider,
+        provider_worker_ceiling,
+    )
+
     # --- Run manifest start (best-effort audit trail) ---
     try:
         manifest_handle = start_run_manifest(
@@ -205,6 +217,12 @@ def main(args) -> None:
             input_file_abs=input_file_path_abs,
             extra={
                 "mode": getattr(app_config, "input_file_profile_name", None),
+                "worker_concurrency": {
+                    "requested_workers": requested_workers,
+                    "effective_workers": effective_workers,
+                    "provider": full_llm_provider,
+                    "provider_ceiling": provider_worker_ceiling,
+                },
             },
         )
     except Exception:
@@ -228,7 +246,6 @@ def main(args) -> None:
 
     # 4. Initialize LLM client for the full sales pipeline
     llm_client: Optional[Any] = None
-    full_llm_provider = (getattr(app_config, "full_llm_provider", "gemini") or "gemini").strip().lower()
     try:
         if full_llm_provider == "openai":
             llm_client = OpenAIClient(config=app_config)
@@ -351,8 +368,6 @@ def main(args) -> None:
             # Parallel end-to-end mode: workers run the full pipeline for row slices.
             # The master process writes a live CSV + JSONL as rows arrive.
             try:
-                requested_workers = int(getattr(args, "workers", 1))
-                effective_workers = effective_worker_count(app_config, full_llm_provider, requested_workers)
                 if effective_workers != requested_workers:
                     logger.warning(
                         "Clamping full-pipeline workers from %s to %s for provider '%s' backpressure.",
@@ -373,6 +388,13 @@ def main(args) -> None:
                     row_range=getattr(args, "range", "") or "",
                     skip_prequalification=getattr(args, "skip_prequalification", False),
                     pitch_from_description=getattr(args, "pitch_from_description", False),
+                )
+                logger.info(
+                    "Parallel run complete. Worker concurrency summary: requested=%s effective=%s provider=%s ceiling=%s",
+                    requested_workers,
+                    effective_workers,
+                    full_llm_provider,
+                    provider_worker_ceiling,
                 )
                 # In parallel mode, the orchestrator produces the SalesOutreachReport_* files directly.
                 _finalize_manifest("completed", None)
@@ -478,6 +500,13 @@ def main(args) -> None:
         canonical_domain_journey_data=canonical_domain_journey_data # Pass the populated dict
     )
     logger.info(f"Pipeline run {run_id} finished. Total duration: {run_metrics['total_duration_seconds']:.2f}s.")
+    logger.info(
+        "Final worker concurrency summary: requested=%s effective=%s provider=%s ceiling=%s",
+        requested_workers,
+        effective_workers,
+        full_llm_provider,
+        provider_worker_ceiling,
+    )
     logger.info(f"Run metrics file: {os.path.join(run_output_dir, f'run_metrics_{run_id}.md')}")
     logger.info(f"All outputs for this run are in: {run_output_dir}")
 

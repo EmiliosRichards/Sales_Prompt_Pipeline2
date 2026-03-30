@@ -27,6 +27,10 @@ When running `main_pipeline.py --pitch-from-description`, the pipeline can still
 - **`PHONE_LLM_PREFER_SNIPPET_KEYWORDS`**: comma-separated snippet keywords that increase candidate priority (default includes `tel,telefon,zentrale,...`).
 - **`ENABLE_PHONE_LLM_RERANK`** (default `True`): run a second LLM call that produces the **only** operational call list (`Top_Number_1..3`) and optionally a `MainOffice_*` backup. If the reranker is disabled, fails, or returns no ranked numbers, the `Top_*` fields remain blank (no heuristic fallback).
 - **`PHONE_LLM_RERANK_MAX_CANDIDATES`** (default `25`): maximum numbers to send to the second-stage ranking LLM per canonical base domain.
+- **`PROVIDER_MAX_INFLIGHT_DEFAULT`** (default `6`): default provider concurrency ceiling used to clamp `--workers`.
+- **`PROVIDER_MAX_INFLIGHT_OPENAI`** (default: same as `PROVIDER_MAX_INFLIGHT_DEFAULT`, currently `6`): OpenAI-specific concurrency ceiling.
+- **`PROVIDER_MAX_INFLIGHT_GEMINI`** (default: same as `PROVIDER_MAX_INFLIGHT_DEFAULT`, currently `6`): Gemini-specific concurrency ceiling.
+- **`PROVIDER_BACKPRESSURE_COOLDOWN_SECONDS`** (default `30`): cooldown duration after repeated provider throttling/service failures.
 
 Current recommended phone-only configuration:
 - `PHONE_LLM_PROVIDER="openai"`
@@ -69,6 +73,20 @@ work across runs for the same canonical base domain, but it does not automatical
 ### Full pipeline phone behavior
 - **`ENABLE_PHONE_RETRIEVAL_IN_FULL_PIPELINE`** (`True/False`): if `False`, the full pipeline never runs phone retrieval; it will still use input phones for pitch gating.
 - **`FORCE_PHONE_EXTRACTION`** (`True/False`): force phone retrieval even when an input phone exists.
+
+---
+
+### Partner matching retrieval and reranking
+- **`MAX_GOLDEN_PARTNERS_IN_PROMPT`** (default `10`): hard cap on how many fused shortlist candidates are shown to the reranker prompt.
+- **`PARTNER_MATCH_SPARSE_TOP_K`** (default `15`): how many candidates survive the field-aware lexical retrieval channel before fusion.
+- **`PARTNER_MATCH_DENSE_TOP_K`** (default `15`): how many candidates survive the local dense retrieval channel before fusion.
+- **`PARTNER_MATCH_FUSED_TOP_K`** (default `10`): how many fused candidates are passed into the final LLM reranker.
+- **`PARTNER_MATCH_RRF_K`** (default `60`): Reciprocal Rank Fusion smoothing constant used when combining sparse and dense retrieval ranks.
+
+Notes:
+- Retrieval now uses a clean partner profile built from audience, products/services, USP, industry, and business model fields.
+- Broad narrative notes are excluded from retrieval scoring.
+- The reranker prompt receives stable `partner_id` values plus evidence-oriented fields, and runtime outputs now expose `match_confidence`, `match_overlap_type`, evidence columns, runner-up partner IDs, and `match_acceptance_reason`.
 
 ---
 

@@ -39,8 +39,12 @@ from src.extractors.llm_tasks.german_short_summary_from_description_task import 
     generate_german_short_summary_from_description,
 )
 from src.extractors.llm_tasks.extract_attributes_task import extract_detailed_attributes
-from src.extractors.llm_tasks.match_partner_task import match_partner
-from src.extractors.llm_tasks.generate_sales_pitch_task import generate_sales_pitch
+from src.extractors.llm_tasks.match_partner_task import assess_partner_match, match_partner
+from src.extractors.llm_tasks.generate_sales_pitch_task import (
+    build_no_match_sales_pitch_output,
+    build_weak_match_sales_pitch_output,
+    generate_sales_pitch,
+)
 from src.extractors.llm_tasks.b2b_capacity_check_task import check_b2b_and_capacity
 from src.utils.helpers import log_row_failure, sanitize_filename_component
 from src.processing.url_processor import process_input_url
@@ -93,15 +97,35 @@ def _pick_best_callable_top_number(row: pd.Series) -> str:
     Pick the best callable number from Top_Number_1..3 while skipping fax entries.
     Returns "" if none found.
     """
+    num, _typ, _src = _pick_best_callable_top_entry(row)
+    return num
+
+
+def _pick_best_callable_top_entry(row: pd.Series) -> Tuple[str, str, str]:
+    """Return (number, type, source_url) for the best callable Top_Number_* entry."""
     for i in (1, 2, 3):
         num = _normalize_phone_str(row.get(f"Top_Number_{i}"))
         typ = str(row.get(f"Top_Type_{i}", "") or "").strip()
+        src_raw = row.get(f"Top_SourceURL_{i}", "")
+        src = "" if src_raw is None else str(src_raw).strip()
         if not num:
             continue
         if _is_fax_type_label(typ):
             continue
-        return num
-    return ""
+        return num, typ, src
+    return "", "", ""
+
+
+def _is_retrieved_phone_source_column(col_name: Optional[str]) -> bool:
+    key = (col_name or "").strip().lower()
+    return key in {
+        "phonenumber_found",
+        "top_number_1",
+        "top_number_2",
+        "top_number_3",
+        "found_number",
+        "bestpersoncontactnumber",
+    }
 
 
 def _configure_full_scraper_runtime(app_config: AppConfig) -> None:
@@ -295,12 +319,18 @@ def execute_pipeline_flow(
     if live_reporter is None and row_queue is None:
         # SalesOutreach live outputs
         live_report_header = list(df.columns) + [
-            'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status', 'is_b2b', 'serves_1000',
+            'CanonicalEntryURL', 'found_number', 'PhoneNumber_Status',
+            'input_phone_number', 'retrieved_phone_number', 'usable_phone_for_pitch', 'phone_status',
+            'is_b2b', 'serves_1000',
             'is_b2b_reason', 'serves_1000_reason', 'Short German Description', 'Industry',
             'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
             'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
             'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
             'Target Group Size Assessment', 'sales_pitch', 'matched_golden_partner',
+            'matched_golden_partner_id', 'match_confidence', 'match_overlap_type',
+            'target_match_evidence', 'partner_match_evidence', 'runner_up_partner_id',
+            'runner_up_partner_name', 'shortlisted_partner_ids', 'shortlisted_partner_names',
+            'match_acceptance_reason',
             'match_reasoning', 'Matched Partner Description', 'Avg Leads Per Day', 'Rank'
         ]
         live_report_path = os.path.join(run_output_dir, f"SalesOutreachReport_{run_id}_live.csv")
@@ -317,12 +347,17 @@ def execute_pipeline_flow(
 
         augmented_header = augmented_base_cols + [
             'CanonicalEntryURL',
+            'input_phone_number', 'retrieved_phone_number', 'usable_phone_for_pitch', 'phone_status',
             'Short German Description', 'Industry',
             'Products/Services Offered', 'USP/Key Selling Points', 'Customer Target Segments',
             'Business Model', 'Company Size Inferred', 'Innovation Level Indicators',
             'Website Clarity Notes', 'B2B Indicator', 'Phone Outreach Suitability',
             'Target Group Size Assessment',
-            'matched_golden_partner', 'match_reasoning',
+            'matched_golden_partner', 'matched_golden_partner_id', 'match_confidence',
+            'match_overlap_type', 'target_match_evidence', 'partner_match_evidence',
+            'runner_up_partner_id', 'runner_up_partner_name',
+            'shortlisted_partner_ids', 'shortlisted_partner_names', 'match_acceptance_reason',
+            'match_reasoning',
             'sales_pitch'
         ]
         # Deduplicate while preserving order
@@ -371,6 +406,14 @@ def execute_pipeline_flow(
             candidate_phone_cols.append("Company Phone")
 
         usable_input_phone = _pick_first_usable_phone(row, df, candidate_phone_cols)
+        input_phone_cols: List[str] = ["GivenPhoneNumber"]
+        if original_phone_column_name and not _is_retrieved_phone_source_column(original_phone_column_name):
+            input_phone_cols.append(original_phone_column_name)
+        if "Company Phone" not in input_phone_cols:
+            input_phone_cols.append("Company Phone")
+        if phone_col_key and not _is_retrieved_phone_source_column(phone_col_key):
+            input_phone_cols.append(phone_col_key)
+        input_phone_number_for_reporting = _pick_first_usable_phone(row, df, input_phone_cols)
         phone_number_original: Optional[str] = usable_input_phone if usable_input_phone else None
         given_url_original_str: str = str(given_url_original) if given_url_original else "MissingURL"
 
@@ -1004,6 +1047,19 @@ def execute_pipeline_flow(
                 if _is_blank_cell(df.at[index, "Primary_SourceURL_1"]):
                     df.at[index, "Primary_SourceURL_1"] = ""
 
+            top_number_for_reporting, top_type_for_reporting, top_source_for_reporting = _pick_best_callable_top_entry(df.loc[index])
+            retrieved_phone_for_reporting = ""
+            if top_number_for_reporting and top_type_for_reporting.lower() != "provided_in_input":
+                if top_source_for_reporting or phone_status in {"Found_Primary", "Found_Secondary"}:
+                    retrieved_phone_for_reporting = top_number_for_reporting
+            elif phone_status in {"Found_Primary", "Found_Secondary"}:
+                retrieved_phone_for_reporting = found_number_val
+
+            df.at[index, 'input_phone_number'] = input_phone_number_for_reporting or None
+            df.at[index, 'retrieved_phone_number'] = retrieved_phone_for_reporting or None
+            df.at[index, 'usable_phone_for_pitch'] = found_number_val or None
+            df.at[index, 'phone_status'] = df.at[index, 'PhoneNumber_Status']
+
             # NOTE: We always create a GoldenPartnerMatchOutput for the row (even when skipping),
             # so downstream outputs can show a reason rather than being blank.
             final_match_output: Optional[GoldenPartnerMatchOutput] = None
@@ -1043,24 +1099,32 @@ def execute_pipeline_flow(
                     or not partner_match_output.matched_partner_name
                     or partner_match_output.matched_partner_name == "No suitable match found"
                 ):
+                    no_match_reason = "partner_match_failed_or_no_match"
+                    if partner_match_output and partner_match_output.matched_partner_name == "No suitable match found":
+                        no_match_reason = "explicit_no_suitable_match"
                     logger.warning(
                         f"{log_identifier} LLM Call 3 (Partner Matching) failed or found no suitable match. "
                         f"Raw: {partner_match_tuple[1]}"
                     )
-                    log_row_failure(
-                        failure_writer, index, company_name_str, given_url_original_str,
-                        "LLM_PartnerMatching_FailedOrNoMatch", "Failed to find a suitable partner match.",
-                        datetime.now().isoformat(),
-                        json.dumps({"raw_response": partner_match_tuple[1] or "N/A"})
-                    )
-                    row_level_failure_counts["LLM_PartnerMatching_FailedOrNoMatch"] += 1
+                    if not partner_match_output:
+                        log_row_failure(
+                            failure_writer, index, company_name_str, given_url_original_str,
+                            "LLM_PartnerMatching_FailedOrNoMatch", "Failed to find a suitable partner match.",
+                            datetime.now().isoformat(),
+                            json.dumps({"raw_response": partner_match_tuple[1] or "N/A"})
+                        )
+                        row_level_failure_counts["LLM_PartnerMatching_FailedOrNoMatch"] += 1
                     final_match_output = GoldenPartnerMatchOutput(
-                        analyzed_company_url=detailed_attributes_obj.input_summary_url,
-                        analyzed_company_attributes=detailed_attributes_obj,
-                        summary=german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
-                        match_rationale_features=["LLM Partner Matching Failed or No Match Found"],
-                        scrape_status=current_row_scraper_status,
+                        **build_no_match_sales_pitch_output(
+                            target_attributes=detailed_attributes_obj,
+                            website_summary_obj=website_summary_obj,
+                            rejection_reason=no_match_reason,
+                            company_name=company_name_str,
+                            partner_match_output=partner_match_output,
+                        ).model_dump()
                     )
+                    final_match_output.summary = german_short_summary or (website_summary_obj.summary if website_summary_obj else None)
+                    final_match_output.scrape_status = current_row_scraper_status
                     all_golden_partner_match_outputs.append(final_match_output)
                 else:
                     logger.info(
@@ -1068,31 +1132,77 @@ def execute_pipeline_flow(
                         f"Matched with: {partner_match_output.matched_partner_name}"
                     )
 
-                    # --- 6. LLM Call 4: Generate Sales Pitch ---
                     matched_partner_data = next(
-                        (p for p in golden_partner_summaries if p.get('name') == partner_match_output.matched_partner_name),
+                        (
+                            p for p in golden_partner_summaries
+                            if (
+                                p.get('partner_id') == partner_match_output.matched_partner_id
+                                or p.get('name') == partner_match_output.matched_partner_name
+                            )
+                        ),
                         None
                     )
-                    if not matched_partner_data:
-                        logger.error(
-                            f"{log_identifier} Could not find full data for matched partner: "
-                            f"{partner_match_output.matched_partner_name}"
+                    match_assessment = assess_partner_match(
+                        partner_match_output,
+                        matched_partner_data,
+                        target_attributes=detailed_attributes_obj,
+                    )
+                    match_decision = match_assessment.get("decision")
+                    match_reason = match_assessment.get("reason")
+                    if match_decision == "no_match":
+                        logger.warning(
+                            f"{log_identifier} Partner match rejected before pitch generation. "
+                            f"Reason={match_reason}; matched_partner={partner_match_output.matched_partner_name}"
                         )
                         final_match_output = GoldenPartnerMatchOutput(
-                            analyzed_company_url=detailed_attributes_obj.input_summary_url,
-                            analyzed_company_attributes=detailed_attributes_obj,
-                            summary=german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
-                            match_rationale_features=["Matched partner data missing; pitch not generated"],
-                            scrape_status=current_row_scraper_status,
+                            **build_no_match_sales_pitch_output(
+                                target_attributes=detailed_attributes_obj,
+                                website_summary_obj=website_summary_obj,
+                                rejection_reason=match_reason,
+                                company_name=company_name_str,
+                                partner_match_output=partner_match_output,
+                            ).model_dump()
                         )
+                        final_match_output.summary = german_short_summary or (website_summary_obj.summary if website_summary_obj else None)
+                        final_match_output.scrape_status = current_row_scraper_status
+                        final_match_output.match_confidence = match_assessment.get("match_confidence") or final_match_output.match_confidence
+                        final_match_output.overlap_type = match_assessment.get("overlap_type") or final_match_output.overlap_type
+                        final_match_output.target_evidence = list(match_assessment.get("target_evidence") or [])
+                        final_match_output.partner_evidence = list(match_assessment.get("partner_evidence") or [])
+                        final_match_output.acceptance_reason = match_reason
+                        all_golden_partner_match_outputs.append(final_match_output)
+                    elif match_decision == "weak_match":
+                        logger.info(
+                            f"{log_identifier} Partner match downgraded to weak-match pitch. "
+                            f"Reason={match_reason}; matched_partner={partner_match_output.matched_partner_name}"
+                        )
+                        final_match_output = GoldenPartnerMatchOutput(
+                            **build_weak_match_sales_pitch_output(
+                                target_attributes=detailed_attributes_obj,
+                                matched_partner=matched_partner_data or {},
+                                website_summary_obj=website_summary_obj,
+                                partner_match_output=partner_match_output,
+                                rejection_reason=match_reason,
+                                company_name=company_name_str,
+                            ).model_dump()
+                        )
+                        final_match_output.summary = german_short_summary or (website_summary_obj.summary if website_summary_obj else None)
+                        final_match_output.scrape_status = current_row_scraper_status
+                        final_match_output.match_confidence = match_assessment.get("match_confidence") or final_match_output.match_confidence
+                        final_match_output.overlap_type = match_assessment.get("overlap_type") or final_match_output.overlap_type
+                        final_match_output.target_evidence = list(match_assessment.get("target_evidence") or [])
+                        final_match_output.partner_evidence = list(match_assessment.get("partner_evidence") or [])
+                        final_match_output.acceptance_reason = match_reason
                         all_golden_partner_match_outputs.append(final_match_output)
                     else:
+                        # --- 6. LLM Call 4: Generate Sales Pitch ---
                         sales_pitch_tuple = generate_sales_pitch(
                             gemini_client=llm_client,
                             config=app_config,
                             target_attributes=detailed_attributes_obj,
                             matched_partner=matched_partner_data,
                             website_summary_obj=website_summary_obj,
+                            partner_match_output=partner_match_output,
                             previous_match_rationale=(partner_match_output.match_rationale_features or []) if partner_match_output else [],
                             llm_context_dir=llm_context_dir,
                             llm_requests_dir=llm_requests_dir,
@@ -1123,7 +1233,22 @@ def execute_pipeline_flow(
                                 analyzed_company_url=detailed_attributes_obj.input_summary_url,
                                 analyzed_company_attributes=detailed_attributes_obj,
                                 summary=german_short_summary or (website_summary_obj.summary if website_summary_obj else None),
+                                match_score=partner_match_output.match_score if partner_match_output else None,
+                                match_confidence=match_assessment.get("match_confidence"),
+                                overlap_type=match_assessment.get("overlap_type"),
                                 match_rationale_features=["LLM Sales Pitch Generation Failed"],
+                                target_evidence=list(match_assessment.get("target_evidence") or []),
+                                partner_evidence=list(match_assessment.get("partner_evidence") or []),
+                                matched_partner_id=partner_match_output.matched_partner_id if partner_match_output else None,
+                                matched_partner_name=partner_match_output.matched_partner_name if partner_match_output else None,
+                                matched_partner_description=matched_partner_data.get("summary") if matched_partner_data else None,
+                                runner_up_partner_id=match_assessment.get("runner_up_partner_id"),
+                                runner_up_partner_name=match_assessment.get("runner_up_partner_name"),
+                                shortlisted_partner_ids=list(getattr(partner_match_output, "shortlisted_partner_ids", None) or []),
+                                shortlisted_partner_names=list(getattr(partner_match_output, "shortlisted_partner_names", None) or []),
+                                acceptance_reason=match_reason,
+                                avg_leads_per_day=matched_partner_data.get("avg_leads_per_day") if matched_partner_data else None,
+                                rank=matched_partner_data.get("rank") if matched_partner_data else None,
                                 scrape_status=current_row_scraper_status,
                             )
                             all_golden_partner_match_outputs.append(final_match_output)
@@ -1141,6 +1266,11 @@ def execute_pipeline_flow(
                             final_match_output.scrape_status = current_row_scraper_status
                             final_match_output.analyzed_company_attributes = detailed_attributes_obj
                             final_match_output.summary = german_short_summary or (website_summary_obj.summary if website_summary_obj else None)
+                            final_match_output.match_confidence = match_assessment.get("match_confidence") or final_match_output.match_confidence
+                            final_match_output.overlap_type = match_assessment.get("overlap_type") or final_match_output.overlap_type
+                            final_match_output.target_evidence = list(match_assessment.get("target_evidence") or [])
+                            final_match_output.partner_evidence = list(match_assessment.get("partner_evidence") or [])
+                            final_match_output.acceptance_reason = match_reason
                             all_golden_partner_match_outputs.append(final_match_output)
 
             input_to_canonical_map[given_url_original_str] = true_base_domain_for_row
@@ -1186,6 +1316,10 @@ def execute_pipeline_flow(
                 'CanonicalEntryURL': true_base_domain_for_row,
                 'PhoneNumber_Status': df.at[index, 'PhoneNumber_Status'],
                 'found_number': df.at[index, 'found_number'] if 'found_number' in df.columns else None,
+                'input_phone_number': df.at[index, 'input_phone_number'] if 'input_phone_number' in df.columns else None,
+                'retrieved_phone_number': df.at[index, 'retrieved_phone_number'] if 'retrieved_phone_number' in df.columns else None,
+                'usable_phone_for_pitch': df.at[index, 'usable_phone_for_pitch'] if 'usable_phone_for_pitch' in df.columns else None,
+                'phone_status': df.at[index, 'phone_status'] if 'phone_status' in df.columns else None,
                 # Use df columns (works even when --skip-prequalification is enabled)
                 'is_b2b': df.at[index, 'is_b2b'] if 'is_b2b' in df.columns else None,
                 'serves_1000': df.at[index, 'serves_1000'] if 'serves_1000' in df.columns else None,
@@ -1205,6 +1339,16 @@ def execute_pipeline_flow(
                 'Target Group Size Assessment': detailed_attributes_obj.target_group_size_assessment if detailed_attributes_obj else None,
                 'sales_pitch': final_match_output.phone_sales_line if final_match_output else None,
                 'matched_golden_partner': final_match_output.matched_partner_name if final_match_output else None,
+                'matched_golden_partner_id': final_match_output.matched_partner_id if final_match_output else None,
+                'match_confidence': final_match_output.match_confidence if final_match_output else None,
+                'match_overlap_type': final_match_output.overlap_type if final_match_output else None,
+                'target_match_evidence': "; ".join(final_match_output.target_evidence) if final_match_output and final_match_output.target_evidence else None,
+                'partner_match_evidence': "; ".join(final_match_output.partner_evidence) if final_match_output and final_match_output.partner_evidence else None,
+                'runner_up_partner_id': final_match_output.runner_up_partner_id if final_match_output else None,
+                'runner_up_partner_name': final_match_output.runner_up_partner_name if final_match_output else None,
+                'shortlisted_partner_ids': "; ".join(final_match_output.shortlisted_partner_ids) if final_match_output and final_match_output.shortlisted_partner_ids else None,
+                'shortlisted_partner_names': "; ".join(final_match_output.shortlisted_partner_names) if final_match_output and final_match_output.shortlisted_partner_names else None,
+                'match_acceptance_reason': final_match_output.acceptance_reason if final_match_output else None,
                 'match_reasoning': "; ".join(final_match_output.match_rationale_features) if final_match_output and final_match_output.match_rationale_features else None,
                 'Matched Partner Description': final_match_output.matched_partner_description if final_match_output else None,
                 'Avg Leads Per Day': final_match_output.avg_leads_per_day if final_match_output else None,

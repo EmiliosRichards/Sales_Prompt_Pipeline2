@@ -3,7 +3,13 @@ import logging
 from typing import Dict, Any, List, Tuple, Optional
 
 from ...core.config import AppConfig
-from ...core.schemas import DetailedCompanyAttributes, GoldenPartnerMatchOutput, SalesPitchLLMOutput, WebsiteTextSummary
+from ...core.schemas import (
+    DetailedCompanyAttributes,
+    GoldenPartnerMatchOutput,
+    PartnerMatchOnlyOutput,
+    SalesPitchLLMOutput,
+    WebsiteTextSummary,
+)
 from ...utils.helpers import sanitize_filename_component
 from ...utils.llm_processing_helpers import (
     load_prompt_template,
@@ -11,6 +17,195 @@ from ...utils.llm_processing_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_phrase(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text or text.lower() in {"none", "null", "nan", "unknown", "not specified"}:
+        return ""
+    return text
+
+
+def _first_meaningful_item(values: Any) -> str:
+    if isinstance(values, list):
+        for item in values:
+            cleaned = _clean_phrase(item)
+            if cleaned:
+                return cleaned
+        return ""
+    return _clean_phrase(values)
+
+
+def _looks_english_heavy(text: str) -> bool:
+    low = _clean_phrase(text).lower()
+    if not low:
+        return False
+    markers = (
+        " and ",
+        " for ",
+        " with ",
+        "software",
+        "solutions",
+        "management",
+        "analytics",
+        "cloud",
+        "production",
+        "mobility",
+        "fleet",
+        "digital shelf",
+        "ai-powered",
+    )
+    hits = sum(1 for marker in markers if marker in f" {low} ")
+    return hits >= 2 or len(low) > 90
+
+
+def _apply_match_metadata(
+    output: GoldenPartnerMatchOutput,
+    partner_match_output: Optional[PartnerMatchOnlyOutput],
+    acceptance_reason: Optional[str] = None,
+) -> GoldenPartnerMatchOutput:
+    if partner_match_output:
+        output.match_score = partner_match_output.match_score or output.match_score
+        output.match_confidence = partner_match_output.match_confidence or output.match_confidence
+        output.overlap_type = partner_match_output.overlap_type or output.overlap_type
+        output.matched_partner_id = partner_match_output.matched_partner_id or output.matched_partner_id
+        output.runner_up_partner_id = partner_match_output.runner_up_partner_id or output.runner_up_partner_id
+        output.runner_up_partner_name = partner_match_output.runner_up_partner_name or output.runner_up_partner_name
+        if partner_match_output.shortlisted_partner_ids:
+            output.shortlisted_partner_ids = list(partner_match_output.shortlisted_partner_ids)
+        if partner_match_output.shortlisted_partner_names:
+            output.shortlisted_partner_names = list(partner_match_output.shortlisted_partner_names)
+        if partner_match_output.target_evidence:
+            output.target_evidence = list(partner_match_output.target_evidence)
+        if partner_match_output.partner_evidence:
+            output.partner_evidence = list(partner_match_output.partner_evidence)
+        if partner_match_output.match_rationale_features and not output.match_rationale_features:
+            output.match_rationale_features = list(partner_match_output.match_rationale_features)
+    if acceptance_reason:
+        output.acceptance_reason = acceptance_reason
+    return output
+
+
+def build_no_match_sales_pitch_output(
+    *,
+    target_attributes: DetailedCompanyAttributes,
+    website_summary_obj: Optional[WebsiteTextSummary],
+    rejection_reason: Optional[str] = None,
+    company_name: Optional[str] = None,
+    partner_match_output: Optional[PartnerMatchOnlyOutput] = None,
+) -> GoldenPartnerMatchOutput:
+    summary = _clean_phrase(getattr(website_summary_obj, "summary", None) if website_summary_obj else None)
+    company_ref = _clean_phrase(company_name) or "Ihr Unternehmen"
+    if _looks_english_heavy(summary):
+        summary = ""
+
+    phone_sales_line = (
+        f"Ich rufe Sie an, weil ich gesehen habe, dass {company_ref} ein klares B2B-Angebot mit erklärungsbedürftigem "
+        "Leistungsprofil hat. Ich würde gerne kurz mit Ihnen besprechen, wie Sie neue relevante Gespräche "
+        "mit passenden Ansprechpartnern noch planbarer aufbauen können."
+    )
+    if summary:
+        phone_sales_line = (
+            f"Ich rufe Sie an, weil ich gesehen habe, dass {company_ref} ein klares Leistungsprofil hat. "
+            "Ich würde gerne kurz mit Ihnen besprechen, wie Sie neue relevante Gespräche mit passenden "
+            "Ansprechpartnern noch planbarer aufbauen können."
+        )
+
+    rationale = ["Kein ausreichend belastbarer Golden-Partner-Match; neutraler, personalisierter Pitch verwendet."]
+    reason_clean = _clean_phrase(rejection_reason)
+    if reason_clean:
+        rationale.append(f"Match verworfen: {reason_clean}")
+
+    output = GoldenPartnerMatchOutput(
+        analyzed_company_url=target_attributes.input_summary_url,
+        analyzed_company_attributes=target_attributes,
+        summary=summary or None,
+        match_score="No Match",
+        match_confidence="no_match",
+        overlap_type=getattr(partner_match_output, "overlap_type", None) if partner_match_output else None,
+        match_rationale_features=rationale,
+        target_evidence=[],
+        partner_evidence=[],
+        phone_sales_line=phone_sales_line,
+        matched_partner_id=None,
+        matched_partner_name=None,
+        matched_partner_description=None,
+        runner_up_partner_id=getattr(partner_match_output, "runner_up_partner_id", None) if partner_match_output else None,
+        runner_up_partner_name=getattr(partner_match_output, "runner_up_partner_name", None) if partner_match_output else None,
+        acceptance_reason=reason_clean or None,
+        avg_leads_per_day=None,
+        rank=None,
+    )
+    output = _apply_match_metadata(output, partner_match_output, acceptance_reason=reason_clean or None)
+    output.match_score = "No Match"
+    output.match_confidence = "no_match"
+    output.matched_partner_id = None
+    output.matched_partner_name = None
+    output.matched_partner_description = None
+    return output
+
+
+def build_weak_match_sales_pitch_output(
+    *,
+    target_attributes: DetailedCompanyAttributes,
+    matched_partner: Dict[str, Any],
+    website_summary_obj: Optional[WebsiteTextSummary],
+    partner_match_output: Optional[PartnerMatchOnlyOutput],
+    rejection_reason: Optional[str] = None,
+    company_name: Optional[str] = None,
+) -> GoldenPartnerMatchOutput:
+    summary = _clean_phrase(getattr(website_summary_obj, "summary", None) if website_summary_obj else None)
+    company_ref = _clean_phrase(company_name) or "Ihr Unternehmen"
+    overlap_type = _clean_phrase(getattr(partner_match_output, "overlap_type", None))
+    target_evidence = list(getattr(partner_match_output, "target_evidence", None) or [])
+    partner_evidence = list(getattr(partner_match_output, "partner_evidence", None) or [])
+    overlap_hint = target_evidence[0] if target_evidence else partner_evidence[0] if partner_evidence else overlap_type
+
+    if overlap_hint:
+        phone_sales_line = (
+            f"Ich rufe Sie an, weil ich gesehen habe, dass {company_ref} bei {overlap_hint} erkennbare Anknüpfungspunkte hat. "
+            "Ich würde gerne kurz mit Ihnen besprechen, wie Sie daraus neue relevante Gespräche mit passenden Ansprechpartnern planbarer aufbauen können."
+        )
+    else:
+        phone_sales_line = (
+            f"Ich rufe Sie an, weil ich gesehen habe, dass {company_ref} ein klares B2B-Angebot mit interessanten Anknüpfungspunkten hat. "
+            "Ich würde gerne kurz mit Ihnen besprechen, wie Sie daraus neue relevante Gespräche mit passenden Ansprechpartnern planbarer aufbauen können."
+        )
+    if summary and not _looks_english_heavy(summary):
+        phone_sales_line = (
+            f"Ich rufe Sie an, weil ich gesehen habe, dass {company_ref} ein klares Leistungsprofil hat und wir in ähnlichen Konstellationen relevante Anknüpfungspunkte sehen. "
+            "Ich würde gerne kurz mit Ihnen besprechen, wie Sie daraus neue relevante Gespräche planbarer aufbauen können."
+        )
+
+    rationale = ["Teilweise belastbarer Golden-Partner-Match; softer Pitch ohne harte Case-Study-Behauptung verwendet."]
+    reason_clean = _clean_phrase(rejection_reason)
+    if reason_clean:
+        rationale.append(f"Schwacher Matchpfad: {reason_clean}")
+    rationale.extend([item for item in (getattr(partner_match_output, "match_rationale_features", None) or []) if _clean_phrase(item)])
+
+    output = GoldenPartnerMatchOutput(
+        analyzed_company_url=target_attributes.input_summary_url,
+        analyzed_company_attributes=target_attributes,
+        summary=summary or None,
+        match_score=getattr(partner_match_output, "match_score", None) or "Medium",
+        match_confidence="weak",
+        overlap_type=getattr(partner_match_output, "overlap_type", None) if partner_match_output else None,
+        match_rationale_features=rationale,
+        target_evidence=target_evidence,
+        partner_evidence=partner_evidence,
+        phone_sales_line=phone_sales_line,
+        matched_partner_id=matched_partner.get("partner_id"),
+        matched_partner_name=matched_partner.get("name"),
+        matched_partner_description=matched_partner.get("summary"),
+        runner_up_partner_id=getattr(partner_match_output, "runner_up_partner_id", None) if partner_match_output else None,
+        runner_up_partner_name=getattr(partner_match_output, "runner_up_partner_name", None) if partner_match_output else None,
+        acceptance_reason=reason_clean or "accepted_weak_match",
+        avg_leads_per_day=None,
+        rank=matched_partner.get("rank"),
+    )
+    output = _apply_match_metadata(output, partner_match_output, acceptance_reason=reason_clean or "accepted_weak_match")
+    output.match_confidence = "weak"
+    return output
 
 def generate_sales_pitch(
     gemini_client: Any,
@@ -23,7 +218,8 @@ def generate_sales_pitch(
     llm_requests_dir: str,
     file_identifier_prefix: str,
     triggering_input_row_id: Any,
-    triggering_company_name: str
+    triggering_company_name: str,
+    partner_match_output: Optional[PartnerMatchOnlyOutput] = None,
 ) -> Tuple[Optional[GoldenPartnerMatchOutput], Optional[str], Optional[Dict[str, int]]]:
     """
     Generates a sales pitch for a target company based on a matched golden partner.
@@ -59,7 +255,7 @@ def generate_sales_pitch(
         matched_partner_json = json.dumps(matched_partner, indent=2)
         formatted_prompt = prompt_template.replace("{{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}", target_attributes_json)
         formatted_prompt = formatted_prompt.replace("{{MATCHED_GOLDEN_PARTNER_JSON_PLACEHOLDER}}", matched_partner_json)
-        previous_rationale_str = "\n".join([f"- {item}" for item in previous_match_rationale])
+        previous_rationale_str = "\n".join([f"- {item}" for item in (previous_match_rationale or [])])
         formatted_prompt = formatted_prompt.replace("{{PREVIOUS_MATCH_RATIONALE_PLACEHOLDER}}", previous_rationale_str)
     except Exception as e:
         logger.error(f"{log_prefix} Failed to load/format sales pitch prompt: {e}", exc_info=True)
@@ -138,11 +334,19 @@ def generate_sales_pitch(
                 summary=website_summary_obj.summary if website_summary_obj else None,
                 match_score=llm_result.parsed_output.match_score,
                 match_rationale_features=llm_result.parsed_output.match_rationale_features or [],
+                target_evidence=[],
+                partner_evidence=[],
                 phone_sales_line=llm_result.parsed_output.phone_sales_line,
+                matched_partner_id=matched_partner.get("partner_id"),
                 matched_partner_name=matched_partner.get("name"),
                 matched_partner_description=matched_partner.get("summary"),
                 avg_leads_per_day=matched_partner.get("avg_leads_per_day"),
                 rank=matched_partner.get("rank"),
+            )
+            parsed_output = _apply_match_metadata(
+                parsed_output,
+                partner_match_output,
+                acceptance_reason="accepted_strong_match",
             )
             logger.info(f"{log_prefix} Successfully parsed SalesPitchLLMOutput and enriched GoldenPartnerMatchOutput.")
             return parsed_output, llm_result.raw_text, token_stats

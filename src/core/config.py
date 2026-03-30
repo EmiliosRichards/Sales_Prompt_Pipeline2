@@ -493,8 +493,7 @@ class AppConfig:
         # --- Extraction Profiles and Prompt Paths ---
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
         
-        def get_clean_path(env_var: str, default_path: str) -> str:
-            raw_path = os.getenv(env_var, default_path)
+        def _normalize_project_path(raw_path: str) -> str:
             # Normalize path separators for consistent checking
             raw_path = raw_path.replace('\\', '/')
             project_root_name = os.path.basename(project_root)
@@ -507,10 +506,24 @@ class AppConfig:
             # Normalize the path to be safe for the current OS
             return os.path.normpath(os.path.join(project_root, raw_path))
 
+        def get_clean_path(env_var: str, default_path: str) -> str:
+            raw_path = os.getenv(env_var, default_path)
+            return _normalize_project_path(raw_path)
+
         self.prompt_path_summarization: str = get_clean_path('PROMPT_PATH_SUMMARIZATION', 'prompts/summarization_prompt.txt')
         self.extraction_profile: str = os.getenv('EXTRACTION_PROFILE', "minimal")
         self.prompt_path_homepage_context: str = get_clean_path('PROMPT_PATH_HOMEPAGE_CONTEXT', 'prompts/homepage_context_prompt.txt')
-        self.PROMPT_PATH_WEBSITE_SUMMARIZER: str = get_clean_path('PROMPT_PATH_WEBSITE_SUMMARIZER', 'prompts/website_summarizer_prompt.txt')
+        website_summarizer_env = (os.getenv('PROMPT_PATH_WEBSITE_SUMMARIZER') or '').strip()
+        if website_summarizer_env:
+            normalized_website_prompt = website_summarizer_env.replace('\\', '/').lower()
+            # The legacy English prompt path was historically set in .env. Treat that exact value as
+            # a workflow default and transparently upgrade it to the German summarizer prompt.
+            if normalized_website_prompt.endswith('website_summarizer_prompt.txt'):
+                self.PROMPT_PATH_WEBSITE_SUMMARIZER = _normalize_project_path('prompts/website_summarizer_prompt_de.txt')
+            else:
+                self.PROMPT_PATH_WEBSITE_SUMMARIZER = _normalize_project_path(website_summarizer_env)
+        else:
+            self.PROMPT_PATH_WEBSITE_SUMMARIZER = _normalize_project_path('prompts/website_summarizer_prompt_de.txt')
         # Used when --pitch-from-description is enabled: create a short, German human-readable summary from input description fields.
         self.PROMPT_PATH_GERMAN_SHORT_SUMMARY_FROM_DESCRIPTION: str = get_clean_path(
             'PROMPT_PATH_GERMAN_SHORT_SUMMARY_FROM_DESCRIPTION',
@@ -532,6 +545,10 @@ class AppConfig:
         self.PROMPT_PATH_GERMAN_PARTNER_MATCHING: str = get_clean_path('PROMPT_PATH_GERMAN_PARTNER_MATCHING', partner_prompt_default)
         self.PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION: str = get_clean_path('PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION', sales_pitch_prompt_default)
         self.MAX_GOLDEN_PARTNERS_IN_PROMPT: int = int(os.getenv('MAX_GOLDEN_PARTNERS_IN_PROMPT', '10'))
+        self.partner_match_sparse_top_k: int = int(os.getenv('PARTNER_MATCH_SPARSE_TOP_K', '15'))
+        self.partner_match_dense_top_k: int = int(os.getenv('PARTNER_MATCH_DENSE_TOP_K', '15'))
+        self.partner_match_fused_top_k: int = int(os.getenv('PARTNER_MATCH_FUSED_TOP_K', '10'))
+        self.partner_match_rrf_k: int = int(os.getenv('PARTNER_MATCH_RRF_K', '60'))
  
         # --- URL Probing Configuration ---
         url_probing_tlds_str: str = os.getenv('URL_PROBING_TLDS', 'de,com,at,ch')
@@ -579,7 +596,10 @@ class AppConfig:
 
         # --- Provider Backpressure / Concurrency Controls ---
         self.provider_max_inflight_default: int = int(os.getenv("PROVIDER_MAX_INFLIGHT_DEFAULT", "6") or 6)
-        self.provider_max_inflight_openai: int = int(os.getenv("PROVIDER_MAX_INFLIGHT_OPENAI", str(self.provider_max_inflight_default)) or self.provider_max_inflight_default)
+        # OpenAI has been stable enough for materially higher parallelism in this workflow.
+        # Keep the explicit provider override separate from the generic default so Gemini and
+        # unknown providers can stay conservative unless intentionally raised.
+        self.provider_max_inflight_openai: int = int(os.getenv("PROVIDER_MAX_INFLIGHT_OPENAI", "30") or 30)
         self.provider_max_inflight_gemini: int = int(os.getenv("PROVIDER_MAX_INFLIGHT_GEMINI", str(self.provider_max_inflight_default)) or self.provider_max_inflight_default)
         self.provider_backpressure_cooldown_seconds: int = int(os.getenv("PROVIDER_BACKPRESSURE_COOLDOWN_SECONDS", "30") or 30)
         self.provider_backpressure_error_burst_threshold: int = int(os.getenv("PROVIDER_BACKPRESSURE_ERROR_BURST_THRESHOLD", "3") or 3)

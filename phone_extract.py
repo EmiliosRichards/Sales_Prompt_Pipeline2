@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 
 from src.core.config import AppConfig
 from src.core.logging_config import setup_logging
-from src.llm_clients.backpressure import effective_worker_count
+from src.llm_clients.backpressure import effective_worker_count, provider_max_inflight
 from src.phone_retrieval.data_handling.normalizer import normalize_phone_number
 from src.phone_retrieval.data_handling.loader import load_and_preprocess_data
 from src.phone_retrieval.extractors.llm_extractor import GeminiLLMExtractor
@@ -867,6 +867,17 @@ def main() -> None:
     if not os.path.exists(input_file_path_abs):
         raise FileNotFoundError(f"Input file not found: {input_file_path_abs}")
 
+    requested_workers = max(1, int(args.workers or 1))
+    workers = effective_worker_count(app_config, app_config.phone_llm_provider, requested_workers)
+    provider_worker_ceiling = provider_max_inflight(app_config, app_config.phone_llm_provider)
+    logger.info(
+        "Worker concurrency summary: requested=%s effective=%s provider=%s ceiling=%s",
+        requested_workers,
+        workers,
+        app_config.phone_llm_provider,
+        provider_worker_ceiling,
+    )
+
     # --- Run manifest start (best-effort audit trail) ---
     try:
         manifest_handle = start_run_manifest(
@@ -880,6 +891,12 @@ def main() -> None:
             input_file_abs=input_file_path_abs,
             extra={
                 "input_profile": getattr(app_config, "input_file_profile_name", None),
+                "worker_concurrency": {
+                    "requested_workers": requested_workers,
+                    "effective_workers": workers,
+                    "provider": app_config.phone_llm_provider,
+                    "provider_ceiling": provider_worker_ceiling,
+                },
             },
         )
     except Exception:
@@ -905,8 +922,6 @@ def main() -> None:
     # This is best-effort only (won't run on hard-kills).
     atexit.register(lambda: _finalize_manifest("failed"))
 
-    requested_workers = max(1, int(args.workers or 1))
-    workers = effective_worker_count(app_config, app_config.phone_llm_provider, requested_workers)
     if workers != requested_workers:
         logger.warning(
             "Clamping phone extraction workers from %s to %s for provider '%s' backpressure.",
@@ -1187,6 +1202,13 @@ def main() -> None:
             logger.info("Cleaned up live output files after successful final+merged writes.")
         else:
             logger.warning("Skipping live output cleanup because not all final artifacts exist yet.")
+        logger.info(
+            "Final worker concurrency summary: requested=%s effective=%s provider=%s ceiling=%s",
+            requested_workers,
+            workers,
+            app_config.phone_llm_provider,
+            provider_worker_ceiling,
+        )
         _finalize_manifest("completed")
         return
 
@@ -1365,6 +1387,13 @@ def main() -> None:
         logger.warning("Skipping live output cleanup because not all final artifacts exist yet.")
 
     logger.info(f"Total duration: {time.time() - pipeline_start_time:.2f}s")
+    logger.info(
+        "Final worker concurrency summary: requested=%s effective=%s provider=%s ceiling=%s",
+        requested_workers,
+        workers,
+        app_config.phone_llm_provider,
+        provider_worker_ceiling,
+    )
     _finalize_manifest("completed")
 
 

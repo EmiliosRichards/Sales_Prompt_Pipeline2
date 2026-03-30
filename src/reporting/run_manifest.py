@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 MANIFEST_FILENAME = "run_manifest.json"
 GLOBAL_HISTORY_FILENAME = "_run_history.jsonl"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 
 
 def _now_iso() -> str:
@@ -128,7 +128,16 @@ def _snapshot_config(app_config: Any) -> Dict[str, Any]:
         "PROMPT_PATH_GERMAN_SALES_PITCH_GENERATION",
         "SALES_PROMPT_LANGUAGE",
         "MAX_GOLDEN_PARTNERS_IN_PROMPT",
+        "partner_match_sparse_top_k",
+        "partner_match_dense_top_k",
+        "partner_match_fused_top_k",
+        "partner_match_rrf_k",
         "PATH_TO_GOLDEN_PARTNERS_DATA",
+        "provider_max_inflight_default",
+        "provider_max_inflight_openai",
+        "provider_max_inflight_gemini",
+        "provider_backpressure_cooldown_seconds",
+        "provider_backpressure_error_burst_threshold",
         # scraping
         "scraper_max_pages_per_domain",
         "max_depth_internal_links",
@@ -454,6 +463,21 @@ def finalize_run_manifest(
             except Exception:
                 pass
 
+        worker_concurrency = None
+        try:
+            extra = base.get("extra") if isinstance(base.get("extra"), dict) else {}
+            if isinstance(extra, dict):
+                candidate = extra.get("worker_concurrency")
+                if isinstance(candidate, dict):
+                    worker_concurrency = {
+                        "requested_workers": candidate.get("requested_workers"),
+                        "effective_workers": candidate.get("effective_workers"),
+                        "provider": candidate.get("provider"),
+                        "provider_ceiling": candidate.get("provider_ceiling"),
+                    }
+        except Exception:
+            worker_concurrency = None
+
         metrics_summary: Optional[Dict[str, Any]] = None
         if isinstance(run_metrics, dict):
             # Keep a compact summary for the manifest + global history
@@ -465,6 +489,9 @@ def finalize_run_manifest(
                 or (run_metrics.get("data_processing_stats") or {}).get("rows_failed_pass1"),
                 "total_duration_seconds": run_metrics.get("total_duration_seconds"),
             }
+        if worker_concurrency:
+            metrics_summary = dict(metrics_summary or {})
+            metrics_summary["worker_concurrency"] = worker_concurrency
 
         # Update manifest
         out = dict(base)

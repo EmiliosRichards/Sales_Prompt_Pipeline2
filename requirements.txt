@@ -15,6 +15,7 @@ openpyxl
 tenacity
 pytest
 trio
+scikit-learn
 
 # Notes:
 # 1. After installing these requirements, you must also run `playwright install`

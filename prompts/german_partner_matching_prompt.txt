@@ -1,102 +1,127 @@
-Your primary task is to analyze the provided [Target Company Attributes JSON] and the [List of Golden Partner Summaries]. Your goal is to identify the most relevant "Golden Partner" to use as a case study.
+Your primary task is to analyze the provided [Target Company Attributes JSON] and the [Shortlisted Golden Partner Candidates]. Your goal is to identify the best Golden Partner case study, or decide that no candidate is strong enough.
 
-Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Do not wrap the JSON in markdown formatting like ```json. Your response must begin with '{' and end with '}'.
+Return a single, valid JSON object. Do not include any conversational preamble, summaries, or text outside this JSON structure. Your response must begin with `{` and end with `}`.
 
 **CRITICAL MATCHING CRITERIA:**
-1.  **Primary Filter: Shared Industry/Audience.** Identify explicit similarities in industry terms, products/services offered, and target audience segments. Consider matches high-confidence when there's a direct semantic match or substantial overlap in key industry or target audience terms.
-2.  **Secondary Filter: Rank.** If multiple partners share equally relevant similarities, choose the partner with the better (lower numeric) rank.
-3.  **No Match Condition.** For the `matched_partner_name` return "No suitable match found" ONLY if there is no direct semantic or substantial overlap in the industry or target audience. `match_score` of "Low". Do not force a match. Do NOT return "No suitable match" when at least one significant keyword or audience segment is shared explicitly.
+1. **Primary Filter: Shared Target Audience / Buyer.** This is the strongest signal. Shared buyer type, department, stakeholder group, or customer segment can justify a strong match even when industries differ.
+2. **Secondary Filter: Shared Problem / Workflow / Use Case.** Strong common ground can also come from similar operational pains, workflows, compliance needs, or buying triggers.
+3. **Industry is Supportive, Not Mandatory.** Do not require the same industry if audience or use-case overlap is stronger.
+4. **No Match Condition.** Return no match only when none of the shortlisted candidates has believable common ground in target audience, buyer, workflow, or use case.
+5. **Evidence Requirement.** The output must cite concise evidence from both the target and the matched partner. These evidence snippets should be grounded in the provided JSON, not generic business language.
 
-4.  **Identify Key Rationale (in German).** Based on the shared attributes, provide a list of 2-4 key reasons for the match in the `match_rationale_features` field. These should be concise, clear, and in German. Examples: "Gemeinsame Zielgruppe: ...", "Ähnliche Produkte/Services: ...", "Überschneidende Marktsegmente: ..."
+**CONFIDENCE TIERS:**
+- Use `match_confidence: "strong"` when the match is clearly supported by audience and/or use-case overlap.
+- Use `match_confidence: "weak"` when there is some believable common ground, but it is partial or indirect.
+- Use `match_confidence: "no_match"` only when no candidate is credible enough.
+
+**OVERLAP TYPES:**
+- `audience`
+- `use_case`
+- `workflow`
+- `industry`
+- `mixed`
+
+**IMPORTANT RULES:**
+- Shared target audience matters more than same-industry language.
+- Generic overlap such as "software", "AI", "automation", "digital transformation", or "efficiency" is not enough by itself.
+- If industries differ but buyer / audience clearly aligns, this can still be a strong match.
+- Prefer quoting short evidence snippets over broad paraphrases.
+- If multiple candidates are plausible, use rank as a tie-breaker and provide the runner-up as well.
+- Do not force a strong match when the only overlap is broad B2B software language.
+- If the shortlist contains a candidate with real workflow or audience common ground, prefer that weak/strong match over a more generic candidate.
+- Use `no_match` when the shortlist lacks a candidate with concrete audience, workflow, or use-case overlap, even if several candidates sound innovative or operationally relevant.
 
 **JSON Response Format:**
 {
   "match_score": "High",
+  "match_confidence": "strong",
+  "overlap_type": "audience",
+  "matched_partner_id": "partner-123",
   "matched_partner_name": "Partner Name",
   "match_rationale_features": [
-    "Gemeinsame Zielgruppe im Gesundheitsbereich, speziell Einrichtungen mit hohem Bedarf an technologiebasierten Lösungen.",
-    "Ähnliche technologische Ausrichtung: Software und assistive Technologien zur Verbesserung der Patientenversorgung und Mobilität."
-  ]
+    "Gemeinsame Zielgruppe: HR-Teams und operative Verantwortliche in Kliniken",
+    "Ähnliche Anwendungsfälle: Planungs- und Compliance-Prozesse"
+  ],
+  "target_evidence": [
+    "HR teams and operations leads in hospitals and care organizations"
+  ],
+  "partner_evidence": [
+    "HR teams, operations managers, hospital administration"
+  ],
+  "runner_up_partner_id": "partner-456",
+  "runner_up_partner_name": "Runner Up Partner"
 }
 
-Few-Shot Examples for Clarification:
+Few-shot guidance:
+Treat these as behavioral patterns, not literal partner names.
 
-Example 1: High Match
-
-Target Company Attributes:
-  Industry: Healthcare Technology
-  Products: AI diagnostic software, patient monitoring
-  Audience: Hospitals, clinics
-
-Golden Partner Summary:
-  Industry: HealthTech
-  Products: Smart patient monitoring, AI-based diagnostics
-  Audience: Hospitals, care facilities
-  Rank: 5
-
-LLM Response:
+Example 1: Strong cross-industry audience match
 {
-"match_score": "High",
-"matched_partner_name": "Example HealthTech GmbH",
-"match_rationale_features": [
-"Gemeinsame Zielgruppe: Krankenhäuser und Kliniken",
-"Ähnliche technologische Lösungen: KI-basierte Diagnostik und Patientenüberwachung"
-]
+  "match_score": "High",
+  "match_confidence": "strong",
+  "overlap_type": "audience",
+  "matched_partner_id": "genericsoft-123",
+  "matched_partner_name": "GenericSoft GmbH",
+  "match_rationale_features": [
+    "Gemeinsame Zielgruppe: HR-Teams und operative Verantwortliche im Gesundheitsumfeld",
+    "Ähnliche Anwendungsfälle: Planungs-, Compliance- und Workflow-Prozesse"
+  ],
+  "target_evidence": [
+    "HR teams and operations leads in hospitals and care organizations"
+  ],
+  "partner_evidence": [
+    "HR teams, operations managers, hospital administration"
+  ],
+  "runner_up_partner_id": "runner-456",
+  "runner_up_partner_name": "Second Choice GmbH"
 }
 
-Example 2: Medium Match (Different target groups, but similar product/service):
-
-Target Company Attributes:
-  Industry: Legal Technology
-  Products: Contract automation software
-  Audience: Law firms, legal departments
-
-Golden Partner Summary:
-  Industry: Software Solutions
-  Products: Document automation and workflow management
-  Audience: General SMEs
-  Rank: 3
-
-LLM Response:
+Example 2: Weak workflow/common-ground match that is acceptable, but not strong
 {
-"match_score": "Medium",
-"matched_partner_name": "GenericSoft GmbH",
-"match_rationale_features": [
-"Ähnliche technologische Lösungen: Automatisierung von Dokumentenprozessen",
-"Allgemeine Überschneidung bei digitalen Workflow-Lösungen"
-]
+  "match_score": "Medium",
+  "match_confidence": "weak",
+  "overlap_type": "workflow",
+  "matched_partner_id": "docflow-789",
+  "matched_partner_name": "Document Workflow Partner GmbH",
+  "match_rationale_features": [
+    "Belastbare, aber indirekte Ueberschneidung bei dokumenten- und prozesslastigen internen Ablaeufen",
+    "Gemeinsamer Fokus auf Transparenz, Freigaben und strukturierte Workflow-Schritte"
+  ],
+  "target_evidence": [
+    "contract automation, approval routing, and internal compliance workflows"
+  ],
+  "partner_evidence": [
+    "document automation, tagging, and workflow management"
+  ],
+  "runner_up_partner_id": "ops-456",
+  "runner_up_partner_name": "Operations Suite GmbH"
 }
 
-Example 3: No Match (No significant overlap):
-
-Target Company Attributes:
-  Industry: Food Manufacturing
-  Products: Organic snacks
-  Audience: Retail supermarkets, health stores
-
-Golden Partner Summary:
-  Industry: Construction Software
-  Products: Digital surveying apps
-  Audience: Construction companies
-  Rank: 2
-
-LLM Response:
+Example 3: No match when overlap is only generic SaaS / AI / efficiency language
 {
-"match_score": "Low",
-"matched_partner_name": "No suitable match found",
-"match_rationale_features": []
+  "match_score": "Low",
+  "match_confidence": "no_match",
+  "overlap_type": "mixed",
+  "matched_partner_id": null,
+  "matched_partner_name": "No suitable match found",
+  "match_rationale_features": [
+    "Kein belastbarer gemeinsamer Buyer, Workflow oder Use Case",
+    "Ueberschneidung bleibt auf generischer Software-, KI- und Effizienzsprache"
+  ],
+  "target_evidence": [
+    "shared mobility operations for carsharing, bikesharing, and fleet booking"
+  ],
+  "partner_evidence": [
+    "document automation and digital workflow platform for SMEs"
+  ],
+  "runner_up_partner_id": null,
+  "runner_up_partner_name": null
 }
-
-Additional Rules to Reduce Ambiguity:
-
-  * If industry terms differ but product/service terms explicitly align, consider at least "Medium" match.
-  * Target audience similarity strongly elevates the match confidence.
-  * If no clear audience or industry/product alignment exists, explicitly choose "No suitable match" to avoid forced or speculative matches.
 
 --------TARGET COMPANY ATTRIBUTES JSON------------
 {{TARGET_COMPANY_ATTRIBUTES_JSON_PLACEHOLDER}}
 -----------END OF JSON-----------------
 
---------LIST OF GOLDEN PARTNER SUMMARIES------------
+--------SHORTLISTED GOLDEN PARTNER CANDIDATES------------
 {{GOLDEN_PARTNER_SUMMARIES_PLACEHOLDER}}
 -----------END OF SUMMARIES-----------------
